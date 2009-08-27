@@ -1,0 +1,13 @@
+#!/usr/bin/make -f
+
+DESTDIR := debian/babeld
+
+%:
+	dh $@
+
+.PHONY: override_dh_auto_install
+override_dh_auto_install:
+	$(MAKE) install TARGET=$(DESTDIR) PREFIX=/usr
+	mv $(DESTDIR)/usr/bin $(DESTDIR)/usr/sbin
+	mkdir -p $(DESTDIR)/usr/share
+	mv $(DESTDIR)/usr/man $(DESTDIR)/usr/share
