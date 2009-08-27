@@ -1,5 +1,5 @@
-babeld (0.96-1) UNRELEASED; urgency=low
+babeld (0.96-1) experimental; urgency=low
 
   * Initial release (Closes: #543377)
 
- -- Stéphane Glondu <glondu@debian.org>  Wed, 26 Aug 2009 21:39:21 +0200
+ -- Stéphane Glondu <glondu@debian.org>  Fri, 28 Aug 2009 01:57:23 +0200
