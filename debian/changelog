@@ -1,3 +1,9 @@
+babeld (0.96-2) UNRELEASED; urgency=low
+
+  * Add missing copyright holders
+
+ -- Stéphane Glondu <glondu@debian.org>  Tue, 01 Sep 2009 22:58:27 +0200
+
 babeld (0.96-1) experimental; urgency=low
 
   * Initial release (Closes: #543377)
