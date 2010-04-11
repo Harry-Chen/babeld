@@ -1,6 +1,6 @@
 /*
 Copyright (c) 2007 by Grégoire Henry
-Copyright (c) 2008 by Juliusz Chroboczek
+Copyright (c) 2008, 2009 by Juliusz Chroboczek
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -37,6 +37,7 @@ THE SOFTWARE.
 #include <sys/types.h>
 #include <sys/sysctl.h>
 #include <sys/socket.h>
+#include <ifaddrs.h>
 #include <net/if.h>
 #include <net/if_dl.h>
 #include <net/route.h>
@@ -45,6 +46,9 @@ THE SOFTWARE.
 #include "neighbour.h"
 #include "kernel.h"
 #include "util.h"
+
+static const unsigned char v4prefix[16] =
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 0, 0, 0, 0 };
 
 int export_table = -1, import_table = -1;
 
@@ -389,8 +393,6 @@ kernel_route(int operation, const unsigned char *dest, unsigned short plen,
     if(!(operation == ROUTE_MODIFY && plen == 128)) {
         rtm->rtm_addrs |= RTA_NETMASK;
     }
-    rtm->rtm_rmx.rmx_hopcount = metric;
-    rtm->rtm_inits = RTV_HOPCOUNT;
 
     sin6 = (struct sockaddr_in6 *)&msg[sizeof(struct rt_msghdr)];
     /* Destination */
@@ -458,10 +460,10 @@ parse_kernel_route(const struct rt_msghdr *rtm, struct kernel_route *route)
     char addr[INET6_ADDRSTRLEN];
 
     memset(route, 0, sizeof(*route));
-    route->metric = rtm->rtm_rmx.rmx_hopcount;
+    route->metric = 0;
     route->ifindex = rtm->rtm_index;
 
-    if(!rtm->rtm_addrs && RTA_DST)
+    if(!(rtm->rtm_addrs & RTA_DST))
         return -1;
     sin6 = (struct sockaddr_in6 *)rta;
     if(IN6_IS_ADDR_LINKLOCAL(&sin6->sin6_addr) 
@@ -472,7 +474,7 @@ parse_kernel_route(const struct rt_msghdr *rtm, struct kernel_route *route)
     memcpy(&route->prefix, &sin6->sin6_addr, 16);
     rta += ROUNDUP(sizeof(struct sockaddr_in6));
    
-    if(!rtm->rtm_addrs && RTA_GATEWAY)
+    if(!(rtm->rtm_addrs & RTA_GATEWAY))
         return -1;
 
     sin6 = (struct sockaddr_in6 *)rta;
@@ -483,7 +485,7 @@ parse_kernel_route(const struct rt_msghdr *rtm, struct kernel_route *route)
     memcpy(&route->gw, &sin6->sin6_addr, 16);
     rta += ROUNDUP(sizeof(struct sockaddr_in6));
 
-    if(!rtm->rtm_addrs && RTA_NETMASK) {
+    if(!(rtm->rtm_addrs & RTA_NETMASK)) {
         route->plen = 0;
     } else {
         sin6 = (struct sockaddr_in6 *)rta;        
@@ -609,11 +611,51 @@ socket_read(int sock)
 }
 
 int
-kernel_addresses(char *ifname, int ifindex,
+kernel_addresses(char *ifname, int ifindex, int ll,
                  struct kernel_route *routes, int maxroutes)
 {
-    errno = ENOSYS;
-    return -1;
+    struct ifaddrs *ifa, *ifap;
+    int rc, i;
+
+    rc = getifaddrs(&ifa);
+    if(rc < 0)
+        return -1;
+
+    ifap = ifa;
+    i = 0;
+
+    while(ifap && i < maxroutes) {
+        if(ifap->ifa_name == NULL || strcmp(ifap->ifa_name, ifname) != 0)
+            goto next;
+        if(ifap->ifa_addr->sa_family == AF_INET6) {
+            struct sockaddr_in6 *sin6 = (struct sockaddr_in6*)ifap->ifa_addr;
+            if(!!ll != !!IN6_IS_ADDR_LINKLOCAL(&sin6->sin6_addr))
+                goto next;
+            memcpy(routes[i].prefix, &sin6->sin6_addr, 16);
+            routes[i].plen = 128;
+            routes[i].metric = 0;
+            routes[i].ifindex = ifindex;
+            routes[i].proto = RTPROT_BABEL_LOCAL;
+            memset(routes[i].gw, 0, 16);
+        } else if(ifap->ifa_addr->sa_family == AF_INET) {
+            struct sockaddr_in *sin = (struct sockaddr_in*)ifap->ifa_addr;
+            if(ll)
+                goto next;
+            memcpy(routes[i].prefix, v4prefix, 12);
+            memcpy(routes[i].prefix + 12, &sin->sin_addr, 4);
+            routes[i].plen = 128;
+            routes[i].metric = 0;
+            routes[i].ifindex = ifindex;
+            routes[i].proto = RTPROT_BABEL_LOCAL;
+            memset(routes[i].gw, 0, 16);
+        }
+    next:
+        ifap = ifap->ifa_next;
+        i++;
+    }
+
+    freeifaddrs(ifa);
+    return i;
 }
 
 int

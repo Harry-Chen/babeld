@@ -1,5 +1,5 @@
 /*
-Copyright 2007, 2008 by Grégoire Henry, Julien Cristau and Juliusz Chroboczek
+Copyright 2007-2010 by Grégoire Henry, Julien Cristau and Juliusz Chroboczek
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -1005,7 +1005,7 @@ filter_kernel_routes(struct nlmsghdr *nh, void *data)
     rtm = (struct rtmsg*)NLMSG_DATA(nh);
     len -= NLMSG_LENGTH(0);
 
-    if(rtm->rtm_protocol == RTPROT_BOOT || rtm->rtm_protocol == RTPROT_BABEL)
+    if(rtm->rtm_protocol == RTPROT_BABEL)
         return 0;
 
     if(rtm->rtm_src_len != 0)
@@ -1266,10 +1266,9 @@ filter_netlink(struct nlmsghdr *nh, void *data)
     return 0;
 }
 
-static int
-kernel_addresses_internal(char *ifname, int ifindex,
-                          struct kernel_route *routes, int maxroutes,
-                          int ll)
+int
+kernel_addresses(char *ifname, int ifindex, int ll,
+                 struct kernel_route *routes, int maxroutes)
 {
     int maxr = maxroutes;
     int found = 0;
@@ -1305,20 +1304,6 @@ kernel_addresses_internal(char *ifname, int ifindex,
         return -1;
 
     return found;
-}
-
-int
-kernel_addresses(char *ifname, int ifindex,
-                 struct kernel_route *routes, int maxroutes)
-{
-    return kernel_addresses_internal(ifname, ifindex, routes, maxroutes, 0);
-}
-
-int
-kernel_ll_addresses(char *ifname, int ifindex,
-                    struct kernel_route *routes, int maxroutes)
-{
-    return kernel_addresses_internal(ifname, ifindex, routes, maxroutes, 1);
 }
 
 int

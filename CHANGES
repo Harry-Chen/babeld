@@ -1,3 +1,16 @@
+8 February 2010: babeld 0.98:
+
+  * Implement the ability to prefer Babel routes to external routes
+    according to the kernel priority (-A).
+  * Implement the ability to redistribute "boot" routes when the protocol
+    is explicitly specified on the "redistribute" line.
+  * Allow trailing whitespace in config file.
+
+5 November 2009: babeld 0.97:
+
+  * INCOMPATIBLE CHANGE: rename babel.{conf,log} to babeld.*.
+  * Use getopt for parsing command-line options.
+
 11 August 2009: babeld 0.96
 
   * Renamed babel to babeld.
