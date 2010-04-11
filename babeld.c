@@ -102,12 +102,11 @@ int
 main(int argc, char **argv)
 {
     struct sockaddr_in6 sin6;
-    int rc, fd, rfd, i;
+    int rc, fd, rfd, i, opt;
     time_t expiry_time, source_expiry_time, kernel_dump_time;
     char *config_file = NULL;
     void *vrc;
     unsigned int seed;
-    char **arg;
     struct network *net;
 
     gettime(&now);
@@ -127,114 +126,119 @@ main(int argc, char **argv)
     parse_address("ff02::cca6:c0f9:e182:5373", protocol_group, NULL);
     protocol_port = 8475;
 
-#define SHIFT() do { arg++; } while(0)
-#define SHIFTE() do { arg++; if(*arg == NULL) goto syntax; } while(0)
-
-    arg = argv;
-
-    SHIFT();
-
-    while(*arg && (*arg)[0] == '-') {
-        if(strcmp(*arg, "--") == 0) {
-            SHIFTE();
+    while(1) {
+        opt = getopt(argc, argv, "m:p:h:H:i:k:A:PsS:d:g:lwt:T:c:C:DL:I:");
+        if(opt < 0)
             break;
-        } else if(strcmp(*arg, "-m") == 0) {
-            SHIFTE();
-            rc = parse_address(*arg, protocol_group, NULL);
+
+        switch(opt) {
+        case 'm':
+            rc = parse_address(optarg, protocol_group, NULL);
             if(rc < 0)
-                goto syntax;
+                goto usage;
             if(protocol_group[0] != 0xff) {
                 fprintf(stderr,
-                        "%s is not a multicast address\n", *arg);
-                goto syntax;
+                        "%s is not a multicast address\n", optarg);
+                goto usage;
             }
             if(protocol_group[1] != 2) {
                 fprintf(stderr,
                         "Warning: %s is not a link-local multicast address\n",
-                        *arg);
+                        optarg);
             }
-        } else if(strcmp(*arg, "-p") == 0) {
-            SHIFTE();
-            protocol_port = atoi(*arg);
-        } else if(strcmp(*arg, "-h") == 0) {
-            SHIFTE();
-            wireless_hello_interval = parse_msec(*arg);
+            break;
+        case 'p':
+            protocol_port = atoi(optarg);
+            break;
+        case 'h':
+            wireless_hello_interval = parse_msec(optarg);
             if(wireless_hello_interval <= 0 ||
                wireless_hello_interval > 0xFFFF * 10)
-                goto syntax;
-        } else if(strcmp(*arg, "-H") == 0) {
-            SHIFTE();
-            wired_hello_interval = parse_msec(*arg);
+                goto usage;
+            break;
+        case 'H':
+            wired_hello_interval = parse_msec(optarg);
             if(wired_hello_interval <= 0 || wired_hello_interval > 0xFFFF * 10)
-                goto syntax;
-        } else if(strcmp(*arg, "-i") == 0) {
-            SHIFTE();
-            idle_hello_interval = parse_msec(*arg);
+                goto usage;
+            break;
+        case 'i':
+            idle_hello_interval = parse_msec(optarg);
             if(idle_hello_interval <= 0 || idle_hello_interval > 0xFFFF * 10)
-                goto syntax;
-        } else if(strcmp(*arg, "-k") == 0) {
-            SHIFTE();
-            kernel_metric = atoi(*arg);
+                goto usage;
+            break;
+        case 'k':
+            kernel_metric = atoi(optarg);
             if(kernel_metric < 0 || kernel_metric > 0xFFFF)
-                goto syntax;
-        } else if(strcmp(*arg, "-P") == 0) {
+                goto usage;
+            break;
+        case 'A':
+            allow_duplicates = atoi(optarg);
+            if(allow_duplicates < 0 || allow_duplicates > 0xFFFF)
+                goto usage;
+            break;
+        case 'P':
             parasitic = 1;
-        } else if(strcmp(*arg, "-s") == 0) {
+            break;
+        case 's':
             split_horizon = 0;
-        } else if(strcmp(*arg, "-S") == 0) {
-            SHIFTE();
-            state_file = *arg;
-        } else if(strcmp(*arg, "-d") == 0) {
-            SHIFTE();
-            debug = atoi(*arg);
-#ifndef NO_LOCAL_INTERFACE
-        } else if(strcmp(*arg, "-g") == 0) {
-            SHIFTE();
-            local_server_port = atoi(*arg);
+            break;
+        case 'S':
+            state_file = optarg;
+            break;
+        case 'd':
+            debug = atoi(optarg);
+            break;
+        case 'g':
+#ifdef NO_LOCAL_INTERFACE
+            fprintf(stderr, "Warning: no local interface in this version.\n");
+#else
+            local_server_port = atoi(optarg);
 #endif
-        } else if(strcmp(*arg, "-l") == 0) {
+            break;
+        case 'l':
             link_detect = 1;
-        } else if(strcmp(*arg, "-w") == 0) {
+            break;
+        case 'w':
             all_wireless = 1;
-        } else if(strcmp(*arg, "-t") == 0) {
-            SHIFTE();
-            export_table = atoi(*arg);
+            break;
+        case 't':
+            export_table = atoi(optarg);
             if(export_table < 0 || export_table > 0xFFFF)
-                goto syntax;
-        } else if(strcmp(*arg, "-T") == 0) {
-            SHIFTE();
-            import_table = atoi(*arg);
+                goto usage;
+            break;
+        case 'T':
+            import_table = atoi(optarg);
             if(import_table < 0 || import_table > 0xFFFF)
-                goto syntax;
-        } else if(strcmp(*arg, "-c") == 0) {
-            SHIFTE();
-            config_file = *arg;
-        } else if(strcmp(*arg, "-C") == 0) {
-            SHIFTE();
-            rc = parse_config_from_string(*arg);
+                goto usage;
+            break;
+        case 'c':
+            config_file = optarg;
+            break;
+        case 'C':
+            rc = parse_config_from_string(optarg);
             if(rc < 0) {
                 fprintf(stderr,
                         "Couldn't parse configuration from command line.\n");
                 exit(1);
             }
-        } else if(strcmp(*arg, "-D") == 0) {
+            break;
+        case 'D':
             do_daemonise = 1;
-        } else if(strcmp(*arg, "-L") == 0) {
-            SHIFTE();
-            logfile = *arg;
-        } else if(strcmp(*arg, "-I") == 0) {
-            SHIFTE();
-            pidfile = *arg;
-        } else {
-            goto syntax;
+            break;
+        case 'L':
+            logfile = optarg;
+            break;
+        case 'I':
+            pidfile = optarg;
+            break;
+        default:
+            goto usage;
         }
-        SHIFT();
     }
 
-
     if(!config_file) {
-        if(access("/etc/babel.conf", R_OK) >= 0)
-            config_file = "/etc/babel.conf";
+        if(access("/etc/babeld.conf", F_OK) >= 0)
+            config_file = "/etc/babeld.conf";
     }
     if(config_file) {
         rc = parse_config_from_file(config_file);
@@ -244,6 +248,10 @@ main(int argc, char **argv)
                     config_file);
             exit(1);
         }
+    } else {
+        if(access("/etc/babel.conf", F_OK) >= 0)
+            fprintf(stderr,
+                    "Warning: /etc/babel.conf exists, it will be ignored.\n");
     }
 
     if(wireless_hello_interval <= 0)
@@ -254,9 +262,15 @@ main(int argc, char **argv)
         wired_hello_interval = 20000;
     wired_hello_interval = MAX(wired_hello_interval, 5);
 
+    if(parasitic && allow_duplicates >= 0) {
+        /* Too difficult to get right. */
+        fprintf(stderr, "Sorry, -P and -A are incompatible.\n");
+        exit(1);
+    }
+
     if(do_daemonise) {
         if(logfile == NULL)
-            logfile = "/var/log/babel.log";
+            logfile = "/var/log/babeld.log";
     }
 
     rc = reopen_logfile();
@@ -328,27 +342,17 @@ main(int argc, char **argv)
         goto fail_pid;
     }
 
-    if(*arg) {
-        unsigned char dummy[16];
-        rc = parse_address(*arg, dummy, NULL);
-        if(rc >= 0) {
-            fprintf(stderr, "Warning: obsolete router-id given.\n");
-            SHIFT();
-        }
-    }
-
     rc = finalise_config();
     if(rc < 0) {
         fprintf(stderr, "Couldn't finalise configuration.\n");
         goto fail;
     }
 
-    while(*arg) {
-        debugf("Adding network %s.\n", *arg);
-        vrc = add_network(*arg, NULL);
+    for(i = optind; i < argc; i++) {
+        debugf("Adding network %s.\n", argv[i]);
+        vrc = add_network(argv[i], NULL);
         if(vrc == NULL)
             goto fail;
-        SHIFT();
     }
 
     if(networks == NULL) {
@@ -775,14 +779,14 @@ main(int argc, char **argv)
     debugf("Done.\n");
     return 0;
 
- syntax:
+ usage:
     fprintf(stderr,
             "Syntax: %s "
             "[-m multicast_address] [-p port] [-S state-file]\n"
             "                "
             "[-h hello] [-H wired_hello] [-i idle_hello]\n"
             "                "
-            "[-k metric] [-s] [-P] [-l] [-w] [-d level] [-g port]\n"
+            "[-k metric] [-A metric] [-s] [-P] [-l] [-w] [-d level] [-g port]\n"
             "                "
             "[-t table] [-T table] [-c file] [-C statement]\n"
             "                "

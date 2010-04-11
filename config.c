@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2007, 2008 by Juliusz Chroboczek
+Copyright (c) 2007-2010 by Juliusz Chroboczek
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -23,6 +23,13 @@ THE SOFTWARE.
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+
+#ifndef __APPLE__
+/* For RTPROT_BOOT */
+#include <sys/socket.h>
+#include <linux/netlink.h>
+#include <linux/rtnetlink.h>
+#endif
 
 #include "babeld.h"
 #include "util.h"
@@ -273,7 +280,7 @@ parse_filter(gnc_t gnc, void *closure)
 
     while(c >= 0 && c != '\n') {
         c = skip_whitespace(c, gnc, closure);
-        if(c == '#') {
+        if(c == '\n' || c == '#') {
             c = skip_to_eol(c, gnc, closure);
             break;
         }
@@ -378,7 +385,7 @@ parse_nconf(gnc_t gnc, void *closure)
         goto error;
 
     c = skip_whitespace(c, gnc, closure);
-    if(c < -1 || c == '#')
+    if(c < -1 || c == '\n' || c == '#')
         goto error;
 
     c = getstring(c, &token, gnc, closure);
@@ -389,8 +396,7 @@ parse_nconf(gnc_t gnc, void *closure)
 
     while(c >= 0 && c != '\n') {
         c = skip_whitespace(c, gnc, closure);
-
-        if(c == '#') {
+        if(c == '\n' || c == '#') {
             c = skip_to_eol(c, gnc, closure);
             break;
         }
@@ -503,12 +509,8 @@ parse_config(gnc_t gnc, void *closure)
 
     while(c >= 0) {
         c = skip_whitespace(c, gnc, closure);
-        if(c == '#') {
+        if(c == '\n' || c == '#') {
             c = skip_to_eol(c, gnc, closure);
-            continue;
-        }
-        if(c == '\n') {
-            c = gnc(closure);
             continue;
         }
         if(c < 0)
@@ -645,7 +647,12 @@ filter_match(struct filter *f, const unsigned char *id,
             return 0;
     } else if(proto == RTPROT_BABEL_LOCAL) {
         return 0;
+#ifndef __APPLE__
+    } else if(proto == RTPROT_BOOT) {
+        return 0;
+#endif
     }
+
     return 1;
 }
 
