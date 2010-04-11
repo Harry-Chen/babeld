@@ -1,9 +1,14 @@
-babeld (0.98-1) UNRELEASED; urgency=low
+babeld (0.98-1) unstable; urgency=low
 
   * New upstream release (Closes: #568906)
+  * Install a default configuration file (Closes: #545072)
+  * Add an initscript (Closes: #545071)
+  * Bump Standards-Version to 3.8.4 (no changes)
   * Add missing copyright holders
+  * Switch to 3.0 (quilt)
+  * Upload to unstable
 
- -- Stéphane Glondu <glondu@debian.org>  Tue, 01 Sep 2009 22:58:27 +0200
+ -- Stéphane Glondu <glondu@debian.org>  Sun, 11 Apr 2010 10:33:41 +0200
 
 babeld (0.96-1) experimental; urgency=low
 
