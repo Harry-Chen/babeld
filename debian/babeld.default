@@ -5,4 +5,4 @@
 INTERFACES=""
 
 # Additional arguments
-DAEMON_ARGS=""
+DAEMON_ARGS="-S /var/lib/babeld/state"
