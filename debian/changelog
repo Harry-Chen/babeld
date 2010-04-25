@@ -1,8 +1,9 @@
-babeld (1.0-1) UNRELEASED; urgency=low
+babeld (1.0-1) unstable; urgency=low
 
   * New upstream release
+  * Use /var/lib/babeld/state for the state
 
- -- Stéphane Glondu <glondu@debian.org>  Sun, 25 Apr 2010 17:12:13 +0200
+ -- Stéphane Glondu <glondu@debian.org>  Sun, 25 Apr 2010 17:24:12 +0200
 
 babeld (0.98-1) unstable; urgency=low
 
