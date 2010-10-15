@@ -234,7 +234,7 @@ switch_routes(struct route *old, struct route *new)
     local_notify_route(new, LOCAL_CHANGE);
 }
 
-void
+static void
 change_route_metric(struct route *route, unsigned newmetric)
 {
     int old, new;
@@ -260,6 +260,13 @@ change_route_metric(struct route *route, unsigned newmetric)
 
     route->metric = newmetric;
     local_notify_route(route, LOCAL_CHANGE);
+}
+
+static void
+retract_route(struct route *route)
+{
+    route->refmetric = INFINITY;
+    change_route_metric(route, INFINITY);
 }
 
 int
@@ -326,31 +333,30 @@ find_best_route(const unsigned char *prefix, unsigned char plen, int feasible,
 void
 update_route_metric(struct route *route)
 {
-    int oldmetric;
-    int newmetric;
+    int oldmetric = route_metric(route);
 
-    oldmetric = route_metric(route);
     if(route_expired(route)) {
         if(route->refmetric < INFINITY) {
             route->seqno = seqno_plus(route->src->seqno, 1);
-            route->refmetric = INFINITY;
+            retract_route(route);
+            if(oldmetric < INFINITY)
+                route_changed(route, route->src, oldmetric);
         }
-        newmetric = INFINITY;
     } else {
         struct neighbour *neigh = route->neigh;
         int add_metric = input_filter(route->src->id,
                                       route->src->prefix, route->src->plen,
                                       neigh->address,
                                       neigh->network->ifindex);
-        newmetric = MIN(route->refmetric +
-                        add_metric +
-                        neighbour_cost(route->neigh),
-                        INFINITY);
-    }
+        int newmetric = MIN(route->refmetric +
+                            add_metric +
+                            neighbour_cost(route->neigh),
+                            INFINITY);
 
-    if(newmetric != oldmetric) {
-        change_route_metric(route, newmetric);
-        route_changed(route, route->src, oldmetric);
+        if(newmetric != oldmetric) {
+            change_route_metric(route, newmetric);
+            route_changed(route, route->src, oldmetric);
+        }
     }
 }
 
@@ -572,10 +578,11 @@ retract_neighbour_routes(struct neighbour *neigh)
     i = 0;
     while(i < numroutes) {
         if(routes[i].neigh == neigh) {
-            unsigned short oldmetric = route_metric(&routes[i]);
-            if(oldmetric != INFINITY) {
-                change_route_metric(&routes[i], INFINITY);
-                route_changed(&routes[i], routes[i].src, oldmetric);
+            if(routes[i].refmetric != INFINITY) {
+                unsigned short oldmetric = route_metric(&routes[i]);
+                    retract_route(&routes[i]);
+                    if(oldmetric != INFINITY)
+                        route_changed(&routes[i], routes[i].src, oldmetric);
             }
         }
         i++;
