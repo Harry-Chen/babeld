@@ -21,14 +21,15 @@ THE SOFTWARE.
 */
 
 #include <sys/time.h>
+#include <sys/param.h>
 #include <time.h>
 
 #include "babeld.h"
 
-#ifdef __APPLE__
-#include "kernel_socket.c"
-#else
+#ifdef __linux
 #include "kernel_netlink.c"
+#else
+#include "kernel_socket.c"
 #endif
 
 /* Like gettimeofday, but returns monotonic time.  If POSIX clocks are not
@@ -75,3 +76,25 @@ gettime(struct timeval *tv)
     previous = tv->tv_sec;
     return rc;
 }
+
+/* If /dev/urandom doesn't exist, this will fail with ENOENT, which the
+   caller will deal with gracefully. */
+
+int
+read_random_bytes(void *buf, size_t len)
+{
+    int fd;
+    int rc;
+
+    fd = open("/dev/urandom", O_RDONLY);
+    if(fd < 0) {
+	rc = -1;
+    } else {
+        rc = read(fd, buf, len);
+        if(rc < len)
+            rc = -1;
+        close(fd);
+    }
+    return rc;
+}
+

@@ -1,5 +1,6 @@
 /*
 Copyright (c) 2007, 2008 by Juliusz Chroboczek
+Copyright (c) 2010 by Vincent Gross
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -102,7 +103,7 @@ int
 main(int argc, char **argv)
 {
     struct sockaddr_in6 sin6;
-    int rc, fd, rfd, i, opt;
+    int rc, fd, i, opt;
     time_t expiry_time, source_expiry_time, kernel_dump_time;
     char *config_file = NULL;
     void *vrc;
@@ -111,20 +112,17 @@ main(int argc, char **argv)
 
     gettime(&now);
 
-    rfd = open("/dev/urandom", O_RDONLY);
-    if(rfd < 0) {
-        perror("open(random)");
-    } else {
-        rc = read(rfd, &seed, sizeof(unsigned int));
-        if(rc < sizeof(unsigned int)) {
-            perror("read(random)");
-        }
+    rc = read_random_bytes(&seed, sizeof(seed));
+    if(rc < 0) {
+        perror("read(random)");
+        seed = 42;
     }
+
     seed ^= (now.tv_sec ^ now.tv_usec);
     srandom(seed);
 
-    parse_address("ff02::cca6:c0f9:e182:5373", protocol_group, NULL);
-    protocol_port = 8475;
+    parse_address("ff02:0:0:0:0:0:1:6", protocol_group, NULL);
+    protocol_port = 6697;
 
     while(1) {
         opt = getopt(argc, argv, "m:p:h:H:i:k:A:PsS:d:g:lwt:T:c:C:DL:I:");
@@ -390,23 +388,16 @@ main(int argc, char **argv)
 
     fprintf(stderr,
             "Warning: couldn't find router id -- using random value.\n");
-    if(rfd >= 0) {
-        rc = read(rfd, myid, 8);
-        if(rc < 8) {
-            perror("read(random)");
-            goto fail;
-        }
-    } else {
+
+    rc = read_random_bytes(myid, 8);
+    if(rc < 0) {
+        perror("read(random)");
         goto fail;
     }
     /* Clear group and global bits */
     myid[0] &= ~3;
 
  have_id:
-    if(rfd >= 0)
-        close(rfd);
-    rfd = -1;
-
     reboot_time = now.tv_sec;
     myseqno = (random() & 0xFFFF);
 

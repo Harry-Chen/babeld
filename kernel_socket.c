@@ -1,6 +1,7 @@
 /*
 Copyright (c) 2007 by Grégoire Henry
 Copyright (c) 2008, 2009 by Juliusz Chroboczek
+Copyright (c) 2010 by Vincent Gross
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -32,6 +33,7 @@ THE SOFTWARE.
 
 #include <strings.h>
 #include <netinet/in.h>
+#include <netinet/icmp6.h>
 #include <arpa/inet.h>
 #include <sys/ioctl.h>
 #include <sys/types.h>
@@ -40,6 +42,7 @@ THE SOFTWARE.
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <net/if_dl.h>
+#include <net/if_media.h>
 #include <net/route.h>
 
 #include "babeld.h"
@@ -77,28 +80,6 @@ static int old_accept_redirects = -1;
 
 static int ifindex_lo = -1;
 static int seq;
-
-static int get_sysctl_int(char *name)
-{
-  int old;
-  size_t len = sizeof (old);
-
-  if (sysctlbyname(name, &old, &len, NULL, 0) < 0)
-    return -1;
-
-  return old;
-}
-
-static int set_sysctl_int(char *name, int new)
-{
-  int old;
-  size_t len = sizeof (old);
-
-  if (sysctlbyname(name, &old, &len, &new, sizeof (new)) < 0)
-    return -1;
-
-  return old;
-}
 
 int
 mask2len(const struct in6_addr *addr)
@@ -153,48 +134,45 @@ plen2mask(int n, struct in6_addr *dest)
 int
 kernel_setup(int setup)
 {
-    int rc;
-    if(setup) {
-        seq = time(NULL);
-        old_forwarding = get_sysctl_int("net.inet6.ip6.forwarding");
-        if(old_forwarding < 0) {
-            perror("Couldn't read forwarding knob.");
-            return -1;
-        }
-        rc = set_sysctl_int("net.inet6.ip6.forwarding",1);
-        if(rc < 0) {
-            perror("Couldn't write forwarding knob.");
-            return -1;
-        }
-        old_accept_redirects = get_sysctl_int("net.inet6.icmp6.rediraccept");
-        if(old_accept_redirects < 0) {
-            perror("Couldn't read accept_redirects knob.");
-            return -1;
-        }
-        rc = set_sysctl_int("net.inet6.icmp6.rediraccept",0);
-        if(rc < 0) {
-            perror("Couldn't write accept_redirects knob.");
-            return -1;
-        }
-        return 1;
-    } else {
-        if(old_forwarding >= 0) {
-            rc = set_sysctl_int("net.inet6.ip6.forwarding",old_forwarding);
-            if(rc < 0) {
-                perror("Couldn't write accept_redirects knob.\n");
-                return -1;
-            }
-        }
-        if(old_accept_redirects >= 0) {
-            rc = set_sysctl_int("net.inet6.icmp6.rediraccept",
-				old_accept_redirects);
-            if(rc < 0) {
-                perror("Couldn't write accept_redirects knob.\n");
-                return -1;
-            }
-        }
-        return 1;
+    int rc = 0;
+    int forwarding = 1;
+    int accept_redirects = 0;
+    int mib[4];
+    size_t datasize;
+
+    mib[0] = CTL_NET;
+    mib[1] = AF_INET6;
+    seq = time(NULL);
+
+    mib[2] = IPPROTO_IPV6;
+    mib[3] = IPV6CTL_FORWARDING;
+    datasize = sizeof(old_forwarding);
+    if (setup)
+        rc = sysctl(mib, 4, &old_forwarding, &datasize,
+                    &forwarding, datasize);
+    else if (old_forwarding >= 0)
+        rc = sysctl(mib, 4, NULL, NULL,
+                    &old_forwarding, datasize);
+    if (rc == -1) {
+        perror("Couldn't tweak forwarding knob.");
+        return -1;
     }
+
+    rc = 0;
+    mib[2] = IPPROTO_ICMPV6;
+    mib[3] = ICMPV6CTL_REDIRACCEPT;
+    datasize = sizeof(old_accept_redirects);
+    if (setup)
+        rc = sysctl(mib, 4, &old_accept_redirects, &datasize,
+                    &accept_redirects, datasize);
+    else if (old_accept_redirects >= 0)
+        rc = sysctl(mib, 4, NULL, NULL,
+                    &old_accept_redirects, datasize);
+    if (rc == -1) {
+        perror("Couldn't tweak accept_redirects knob.");
+        return -1;
+    }
+    return 1;
 }
 
 int
@@ -204,7 +182,7 @@ kernel_setup_socket(int setup)
     int zero = 0;
     if(setup) {
         if(kernel_socket < 0) {
-            kernel_socket = socket(PF_ROUTE, SOCK_RAW, AF_INET6);
+            kernel_socket = socket(PF_ROUTE, SOCK_RAW, AF_UNSPEC);
             if(kernel_socket < 0)
                 return -1;
         }
@@ -303,7 +281,20 @@ kernel_interface_mtu(const char *ifname, int ifindex)
 int
 kernel_interface_wireless(const char *ifname, int ifindex)
 {
-    return -1;
+    struct ifmediareq ifmr;
+    int s, rc;
+
+    s = socket(PF_INET6, SOCK_DGRAM, 0);
+    memset(&ifmr, 0, sizeof(ifmr));
+    strncpy(ifmr.ifm_name, ifname, sizeof(ifmr.ifm_name));
+    rc = ioctl(s, SIOCGIFMEDIA, (caddr_t)&ifmr);
+    close(s);
+    if (rc < 0)
+        return rc;
+    if ((ifmr.ifm_active & IFM_NMASK) == IFM_IEEE80211)
+        return 1;
+    else
+        return 0;
 }
 
 int
@@ -312,13 +303,16 @@ kernel_route(int operation, const unsigned char *dest, unsigned short plen,
              const unsigned char *newgate, int newifindex,
              unsigned int newmetric)
 {
-
     unsigned char msg[512];
     struct rt_msghdr *rtm;
     struct sockaddr_in6 *sin6;
-    int rc, len;
+    struct sockaddr_in *sin;
+    int rc, len, ipv4;
 
-    char local[1][1][16] = IN6ADDR_LOOPBACK_INIT;
+    char local6[1][1][16] = IN6ADDR_LOOPBACK_INIT;
+    char local4[1][1][16] =
+        {{{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x7f, 0x00, 0x00, 0x01 }}};
 
     /* Check that the protocol family is consistent. */
     if(plen >= 96 && v4mapped(dest)) {
@@ -326,17 +320,13 @@ kernel_route(int operation, const unsigned char *dest, unsigned short plen,
             errno = EINVAL;
             return -1;
         }
+        ipv4 = 1;
     } else {
         if(v4mapped(gate)) {
             errno = EINVAL;
             return -1;
         }
-    }
-
-    if(v4mapped(gate)) {
-        /* Not implemented yet. */
-        errno = ENOSYS;
-        return -1;
+        ipv4 = 0;
     }
 
     if(operation == ROUTE_MODIFY && newmetric == metric && 
@@ -350,35 +340,35 @@ kernel_route(int operation, const unsigned char *dest, unsigned short plen,
     }
 
     kdebugf("kernel_route: %s %s/%d metric %d dev %d nexthop %s\n",
-           operation == ROUTE_ADD ? "add" :
-           operation == ROUTE_FLUSH ? "flush" : "change",
-           format_address(dest), plen, metric, ifindex,
-           format_address(gate));
+            operation == ROUTE_ADD ? "add" :
+            operation == ROUTE_FLUSH ? "flush" : "change",
+            format_address(dest), plen, metric, ifindex,
+            format_address(gate));
 
     if(kernel_socket < 0) kernel_setup_socket(1);
-    
+
     memset(&msg, 0, sizeof(msg));
     rtm = (struct rt_msghdr *)msg;
     rtm->rtm_version = RTM_VERSION;
     switch(operation) {
     case ROUTE_FLUSH:
-      rtm->rtm_type = RTM_DELETE; break;
+        rtm->rtm_type = RTM_DELETE; break;
     case ROUTE_ADD:
-      rtm->rtm_type = RTM_ADD; break;
+        rtm->rtm_type = RTM_ADD; break;
     case ROUTE_MODIFY: 
-      rtm->rtm_type = RTM_CHANGE; break;
+        rtm->rtm_type = RTM_CHANGE; break;
     default: 
-      return -1;
+        return -1;
     };
     rtm->rtm_index = ifindex;
     rtm->rtm_flags = RTF_UP | RTF_PROTO2;
     if(plen == 128) rtm->rtm_flags |= RTF_HOST;
-/*     if(memcmp(nexthop->id, dest, 16) == 0) { */
-/*         rtm -> rtm_flags |= RTF_LLINFO; */
-/*         rtm -> rtm_flags |= RTF_CLONING; */
-/*     } else { */
-        rtm->rtm_flags |= RTF_GATEWAY;
-/*     } */
+    /*     if(memcmp(nexthop->id, dest, 16) == 0) { */
+    /*         rtm -> rtm_flags |= RTF_LLINFO; */
+    /*         rtm -> rtm_flags |= RTF_CLONING; */
+    /*     } else { */
+    rtm->rtm_flags |= RTF_GATEWAY;
+    /*     } */
     if(metric == KERNEL_INFINITY) {
         rtm->rtm_flags |= RTF_BLACKHOLE;
         if(ifindex_lo < 0) {
@@ -394,30 +384,63 @@ kernel_route(int operation, const unsigned char *dest, unsigned short plen,
         rtm->rtm_addrs |= RTA_NETMASK;
     }
 
-    sin6 = (struct sockaddr_in6 *)&msg[sizeof(struct rt_msghdr)];
-    /* Destination */
-    sin6->sin6_len = sizeof(struct sockaddr_in6);
-    sin6->sin6_family = AF_INET6;
-    sin6->sin6_addr = *((struct in6_addr *)dest);
-    sin6 = (struct sockaddr_in6 *)((char *)sin6 + ROUNDUP(sin6->sin6_len));
-    /* Gateway */
-    sin6->sin6_len = sizeof(struct sockaddr_in6);
-    sin6->sin6_family = AF_INET6;
-    if (metric == KERNEL_INFINITY) 
-        sin6->sin6_addr = *((struct in6_addr *)*local);
-    else
-        sin6->sin6_addr = *((struct in6_addr *)gate);
-    if(IN6_IS_ADDR_LINKLOCAL (&sin6->sin6_addr))
-        SET_IN6_LINKLOCAL_IFINDEX (sin6->sin6_addr, ifindex);
-    sin6 = (struct sockaddr_in6 *)((char *)sin6 + ROUNDUP(sin6->sin6_len));
-    /* Netmask */
-    if((rtm->rtm_addrs | RTA_NETMASK) != 0) {
-        sin6->sin6_len = sizeof(struct sockaddr_in6);
-        sin6->sin6_family = AF_INET6;
-        plen2mask(plen, &sin6->sin6_addr);
-        sin6 = (struct sockaddr_in6 *)((char *)sin6 + ROUNDUP(sin6->sin6_len));
+#define push_sockaddr_in(ptr, offset) \
+    do { (ptr) = (struct sockaddr_in *)((char *)(ptr) + (offset)); \
+         (ptr)->sin_len = sizeof(struct sockaddr_in); \
+         (ptr)->sin_family = AF_INET; } while (0)
+
+#define get_sin_addr(dst,src) \
+    do { memcpy((dst), (src) + 12, 4); } while (0)
+
+#define push_sockaddr_in6(ptr, offset) \
+    do { (ptr) = (struct sockaddr_in6 *)((char *)(ptr) + (offset)); \
+         (ptr)->sin6_len = sizeof(struct sockaddr_in6); \
+         (ptr)->sin6_family = AF_INET6; } while (0)
+
+#define get_sin6_addr(dst,src) \
+    do { memcpy((dst), (src), 16); } while (0)
+
+    /* KAME ipv6 stack does not support IPv4 mapped IPv6, so we have to
+     * duplicate the codepath */
+    if(ipv4) {
+        sin = (struct sockaddr_in *)msg;
+        /* destination */
+        push_sockaddr_in(sin, sizeof(*rtm));
+        get_sin_addr(&(sin->sin_addr), dest);
+        /* gateway */
+        push_sockaddr_in(sin, ROUNDUP(sin->sin_len));
+        if (metric == KERNEL_INFINITY)
+            get_sin_addr(&(sin->sin_addr),**local4);
+        else
+            get_sin_addr(&(sin->sin_addr),gate);
+        /* netmask */
+        if((rtm->rtm_addrs | RTA_NETMASK) != 0) {
+            struct in6_addr tmp_sin6_addr;
+            push_sockaddr_in(sin, ROUNDUP(sin->sin_len));
+            plen2mask(plen, &tmp_sin6_addr);
+            get_sin_addr(&(sin->sin_addr), (char *)&tmp_sin6_addr);
+        }
+        len = (char *)sin + ROUNDUP(sin->sin_len) - (char *)msg;
+    } else {
+        sin6 = (struct sockaddr_in6 *)msg;
+        /* destination */
+        push_sockaddr_in6(sin6, sizeof(*rtm));
+        get_sin6_addr(&(sin6->sin6_addr), dest);
+        /* gateway */
+        push_sockaddr_in6(sin6, ROUNDUP(sin6->sin6_len));
+        if (metric == KERNEL_INFINITY)
+            get_sin6_addr(&(sin6->sin6_addr),**local6);
+        else
+            get_sin6_addr(&(sin6->sin6_addr),gate);
+        if(IN6_IS_ADDR_LINKLOCAL (&sin6->sin6_addr))
+            SET_IN6_LINKLOCAL_IFINDEX (sin6->sin6_addr, ifindex);
+        /* netmask */
+        if((rtm->rtm_addrs | RTA_NETMASK) != 0) {
+            push_sockaddr_in6(sin6, ROUNDUP(sin6->sin6_len));
+            plen2mask(plen, &sin6->sin6_addr);
+        }
+        len = (char *)sin6 + ROUNDUP(sin6->sin6_len) - (char *)msg;
     }
-    len = (char *)sin6 - (char *)msg;
     rtm->rtm_msglen = len;
 
     rc = write(kernel_socket, msg, rtm->rtm_msglen);
@@ -625,18 +648,24 @@ kernel_addresses(char *ifname, int ifindex, int ll,
     i = 0;
 
     while(ifap && i < maxroutes) {
-        if(ifap->ifa_name == NULL || strcmp(ifap->ifa_name, ifname) != 0)
+        if((ifname != NULL && strcmp(ifap->ifa_name, ifname) != 0))
             goto next;
         if(ifap->ifa_addr->sa_family == AF_INET6) {
             struct sockaddr_in6 *sin6 = (struct sockaddr_in6*)ifap->ifa_addr;
             if(!!ll != !!IN6_IS_ADDR_LINKLOCAL(&sin6->sin6_addr))
                 goto next;
             memcpy(routes[i].prefix, &sin6->sin6_addr, 16);
+            if(ll)
+                /* This a perfect example of counter-productive optimisation :
+                   KAME encodes interface index onto bytes 2 and 3, so we have to
+                   reset those bytes to 0 before passing them to babeld. */
+                memset(routes[i].prefix + 2, 0, 2);
             routes[i].plen = 128;
             routes[i].metric = 0;
             routes[i].ifindex = ifindex;
             routes[i].proto = RTPROT_BABEL_LOCAL;
             memset(routes[i].gw, 0, 16);
+            i++;
         } else if(ifap->ifa_addr->sa_family == AF_INET) {
             struct sockaddr_in *sin = (struct sockaddr_in*)ifap->ifa_addr;
             if(ll)
@@ -648,10 +677,10 @@ kernel_addresses(char *ifname, int ifindex, int ll,
             routes[i].ifindex = ifindex;
             routes[i].proto = RTPROT_BABEL_LOCAL;
             memset(routes[i].gw, 0, 16);
+            i++;
         }
-    next:
+ next:
         ifap = ifap->ifa_next;
-        i++;
     }
 
     freeifaddrs(ifa);
