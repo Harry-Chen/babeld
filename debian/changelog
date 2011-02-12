@@ -1,8 +1,11 @@
-babeld (1.1.0-1) UNRELEASED; urgency=low
+babeld (1.1.0-1) unstable; urgency=low
 
   * New upstream release
+  * Add NEWS file to document incompatible changes
+  * Bump Standards-Version to 3.9.1
+  * Bump debhelper compat level to 8
 
- -- Stéphane Glondu <glondu@debian.org>  Sat, 16 Oct 2010 09:01:24 +0200
+ -- Stéphane Glondu <glondu@debian.org>  Sat, 12 Feb 2011 12:26:16 +0100
 
 babeld (1.0.1-1) unstable; urgency=low
 
