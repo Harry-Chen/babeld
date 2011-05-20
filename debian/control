@@ -3,7 +3,7 @@ Section: net
 Priority: extra
 Maintainer: Stéphane Glondu <glondu@debian.org>
 Build-Depends: debhelper (>= 8)
-Standards-Version: 3.9.1
+Standards-Version: 3.9.2
 Homepage: http://www.pps.jussieu.fr/~jch/software/babel/
 Vcs-Browser: http://git.debian.org/?p=collab-maint/babeld.git
 Vcs-Git: git://git.debian.org/git/collab-maint/babeld.git
