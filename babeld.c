@@ -257,7 +257,7 @@ main(int argc, char **argv)
     wireless_hello_interval = MAX(wireless_hello_interval, 5);
 
     if(wired_hello_interval <= 0)
-        wired_hello_interval = 20000;
+        wired_hello_interval = 4000;
     wired_hello_interval = MAX(wired_hello_interval, 5);
 
     if(parasitic && allow_duplicates >= 0) {
@@ -347,7 +347,6 @@ main(int argc, char **argv)
     }
 
     for(i = optind; i < argc; i++) {
-        debugf("Adding network %s.\n", argv[i]);
         vrc = add_network(argv[i], NULL);
         if(vrc == NULL)
             goto fail;
@@ -430,7 +429,7 @@ main(int argc, char **argv)
                 } else {
                     struct timeval realnow;
                     debugf("Got %s %d %ld from babel-state.\n",
-                           format_address(sid), s, t);
+                           format_eui64(sid), s, t);
                     gettimeofday(&realnow, NULL);
                     if(memcmp(sid, myid, 8) == 0)
                         myseqno = seqno_plus(s, 1);
