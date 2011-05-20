@@ -14,11 +14,11 @@ Depends:
  ${shlibs:Depends},
  ${misc:Depends}
 Recommends: ahcpd
-Description: a loop-free distance-vector routing protocol
+Description: loop-free distance-vector routing protocol
  Babel is a distance-vector routing protocol for IPv6 and IPv4 with
- fast convergence properties. It was designed to be robust and
- efficient on both wireless mesh networks and classical wired
- networks.  Babel has extremely modest memory and CPU
+ fast convergence properties, described in RFC 6126. It was designed
+ to be robust and efficient on both wireless mesh networks and
+ classical wired networks. Babel has extremely modest memory and CPU
  requirements. Unlike most routing protocols, which route either IPv4
  or IPv6 but not both at the same time, Babel is a hybrid IPv6 and
  IPv4 protocol: a single update packet can carry both IPv6 and IPv4
