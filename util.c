@@ -77,7 +77,7 @@ timeval_minus_msec(const struct timeval *s1, const struct timeval *s2)
 }
 
 void
-timeval_plus_msec(struct timeval *d, const struct timeval *s, int msecs)
+timeval_add_msec(struct timeval *d, const struct timeval *s, int msecs)
 {
     int usecs;
     d->tv_sec = s->tv_sec + msecs / 1000;
@@ -219,6 +219,9 @@ mask_prefix(unsigned char *restrict ret,
 
 static const unsigned char v4prefix[16] =
     {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 0, 0, 0, 0 };
+
+static const unsigned char llprefix[16] =
+    {0xFE, 0x80};
 
 const char *
 format_address(const unsigned char *address)
@@ -404,6 +407,12 @@ martian_prefix(const unsigned char *prefix, int plen)
         (plen >= 96 && v4mapped(prefix) &&
          ((plen >= 104 && (prefix[12] == 127 || prefix[12] == 0)) ||
           (plen >= 100 && (prefix[12] & 0xE0) == 0xE0)));
+}
+
+int
+linklocal(const unsigned char *address)
+{
+    return memcmp(address, llprefix, 8) == 0;
 }
 
 int

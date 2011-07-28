@@ -23,6 +23,7 @@ THE SOFTWARE.
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <assert.h>
 #include <sys/time.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
@@ -37,7 +38,7 @@ THE SOFTWARE.
 #include "neighbour.h"
 #include "message.h"
 #include "route.h"
-#include "config.h"
+#include "configuration.h"
 
 struct network *networks = NULL;
 
@@ -60,14 +61,13 @@ add_network(char *ifname, struct network_conf *conf)
 {
     struct network *net;
 
-    if(conf) {
-        if(strcmp(ifname, conf->ifname) != 0)
-            return NULL;
-    }
+    assert(!conf || strcmp(ifname, conf->ifname) == 0);
 
     FOR_ALL_NETS(net) {
-        if(strcmp(net->ifname, ifname) == 0)
+        if(strcmp(net->ifname, ifname) == 0) {
+            assert(conf == NULL);
             return net;
+        }
     }
 
     net = malloc(sizeof(struct network));
@@ -145,9 +145,9 @@ update_jitter(struct network *net, int urgent)
 }
 
 void
-delay_jitter(struct timeval *timeout, int msecs)
+set_timeout(struct timeval *timeout, int msecs)
 {
-    timeval_plus_msec(timeout, &now, roughly(msecs));
+    timeval_add_msec(timeout, &now, roughly(msecs));
 }
 
 static int
@@ -334,8 +334,8 @@ network_up(struct network *net, int up)
                 memcpy(net->ll, ll, rc * 16);
             }
         }
-        delay_jitter(&net->hello_timeout, net->hello_interval);
-        delay_jitter(&net->update_timeout, net->update_interval);
+        set_timeout(&net->hello_timeout, net->hello_interval);
+        set_timeout(&net->update_timeout, net->update_interval);
         send_hello(net);
         send_request(net, NULL, 0);
     } else {

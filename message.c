@@ -38,7 +38,7 @@ THE SOFTWARE.
 #include "xroute.h"
 #include "resend.h"
 #include "message.h"
-#include "config.h"
+#include "configuration.h"
 #include "kernel.h"
 
 unsigned char packet_header[4] = {42, 2};
@@ -57,8 +57,6 @@ struct timeval unicast_flush_timeout = {0, 0};
 
 static const unsigned char v4prefix[16] =
     {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 0, 0, 0, 0 };
-static const unsigned char ll_prefix[16] =
-    {0xFE, 0x80};
 
 static int
 network_prefix(int ae, int plen, unsigned int omitted,
@@ -135,8 +133,7 @@ parse_packet(const unsigned char *from, struct network *net,
     unsigned char router_id[8], v4_prefix[16], v6_prefix[16],
         v4_nh[16], v6_nh[16];
 
-
-    if(from[0] != 0xFE || (from[1] & 0xC0) != 0x80) {
+    if(!linklocal(from)) {
         fprintf(stderr, "Received packet from non-local address %s.\n",
                 format_address(from));
         return;
@@ -482,7 +479,7 @@ schedule_flush(struct network *net)
     if(net->flush_timeout.tv_sec != 0 &&
        timeval_minus_msec(&net->flush_timeout, &now) < msecs)
         return;
-    delay_jitter(&net->flush_timeout, msecs);
+    set_timeout(&net->flush_timeout, msecs);
 }
 
 static void
@@ -493,7 +490,7 @@ schedule_flush_now(struct network *net)
     if(net->flush_timeout.tv_sec != 0 &&
        timeval_minus_msec(&net->flush_timeout, &now) < msecs)
         return;
-    delay_jitter(&net->flush_timeout, msecs);
+    set_timeout(&net->flush_timeout, msecs);
 }
 
 static void
@@ -630,7 +627,7 @@ send_hello_noupdate(struct network *net, unsigned interval)
         flushbuf(net);
 
     net->hello_seqno = seqno_plus(net->hello_seqno, 1);
-    delay_jitter(&net->hello_timeout, net->hello_interval);
+    set_timeout(&net->hello_timeout, net->hello_interval);
 
     if(!net_up(net))
         return;
@@ -927,7 +924,7 @@ schedule_update_flush(struct network *net, int urgent)
     if(net->update_flush_timeout.tv_sec != 0 &&
        timeval_minus_msec(&net->update_flush_timeout, &now) < msecs)
         return;
-    delay_jitter(&net->update_flush_timeout, msecs);
+    set_timeout(&net->update_flush_timeout, msecs);
 }
 
 static void
@@ -1005,7 +1002,7 @@ send_update(struct network *net, int urgent,
                                       routes[i].src->plen);
             }
         }
-        delay_jitter(&net->update_timeout, net->update_interval);
+        set_timeout(&net->update_timeout, net->update_interval);
     }
     schedule_update_flush(net, urgent);
 }
@@ -1128,7 +1125,7 @@ send_ihu(struct neighbour *neigh, struct network *net)
            neigh->network->ifname,
            format_address(neigh->address));
 
-    ll = in_prefix(neigh->address, ll_prefix, 64);
+    ll = linklocal(neigh->address);
 
     if(unicast_neighbour != neigh) {
         start_message(net, MESSAGE_IHU, ll ? 14 : 22);

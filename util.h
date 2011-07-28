@@ -71,8 +71,8 @@ void timeval_minus(struct timeval *d,
                    const struct timeval *s1, const struct timeval *s2);
 unsigned timeval_minus_msec(const struct timeval *s1, const struct timeval *s2)
     ATTRIBUTE ((pure));
-void timeval_plus_msec(struct timeval *d,
-                       const struct timeval *s, int msecs);
+void timeval_add_msec(struct timeval *d,
+                      const struct timeval *s, int msecs);
 int timeval_compare(const struct timeval *s1, const struct timeval *s2)
     ATTRIBUTE ((pure));
 void timeval_min(struct timeval *d, const struct timeval *s);
@@ -95,6 +95,7 @@ int parse_net(const char *net, unsigned char *prefix_r, unsigned char *plen_r,
 int parse_eui64(const char *eui, unsigned char *eui_r);
 int wait_for_fd(int direction, int fd, int msecs);
 int martian_prefix(const unsigned char *prefix, int plen) ATTRIBUTE ((pure));
+int linklocal(const unsigned char *address) ATTRIBUTE ((pure));
 int v4mapped(const unsigned char *address) ATTRIBUTE ((pure));
 void v4tov6(unsigned char *dst, const unsigned char *src);
 int daemonise(void);
