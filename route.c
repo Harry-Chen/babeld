@@ -44,6 +44,7 @@ struct route *routes = NULL;
 int numroutes = 0, maxroutes = 0;
 int kernel_metric = 0;
 int allow_duplicates = -1;
+int keep_unfeasible = 0;
 
 struct route *
 find_route(const unsigned char *prefix, unsigned char plen,
@@ -361,17 +362,24 @@ update_route_metric(struct route *route)
     }
 }
 
+/* Called whenever a neighbour's cost changes, to update the metric of
+   all routes through that neighbour.  Calls local_notify_neighbour. */
 void
-update_neighbour_metric(struct neighbour *neigh)
+update_neighbour_metric(struct neighbour *neigh, int changed)
 {
-    int i;
 
-    i = 0;
-    while(i < numroutes) {
-        if(routes[i].neigh == neigh)
-            update_route_metric(&routes[i]);
-        i++;
+    if(changed) {
+        int i;
+
+        i = 0;
+        while(i < numroutes) {
+            if(routes[i].neigh == neigh)
+                update_route_metric(&routes[i]);
+            i++;
+        }
     }
+
+    local_notify_neighbour(neigh, LOCAL_CHANGE);
 }
 
 void
@@ -448,7 +456,7 @@ update_route(const unsigned char *a, const unsigned char *p, unsigned char plen,
         }
 
         route->src = src;
-        if(feasible && refmetric < INFINITY)
+        if((feasible || keep_unfeasible) && refmetric < INFINITY)
             route->time = now.tv_sec;
         route->seqno = seqno;
         route->refmetric = refmetric;
@@ -468,8 +476,10 @@ update_route(const unsigned char *a, const unsigned char *p, unsigned char plen,
             return NULL;
         if(!feasible) {
             send_unfeasible_request(neigh, 0, seqno, metric, src);
-            return NULL;
+            if(!keep_unfeasible)
+                return NULL;
         }
+
         if(numroutes >= maxroutes) {
             struct route *new_routes;
             int n = maxroutes < 1 ? 8 : 2 * maxroutes;
