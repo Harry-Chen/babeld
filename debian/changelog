@@ -1,8 +1,9 @@
-babeld (1.2.1-1) UNRELEASED; urgency=low
+babeld (1.2.1-1) unstable; urgency=low
 
   * New upstream release
+  * Updated description suggested by Boris Ganne
 
- -- Stéphane Glondu <glondu@debian.org>  Wed, 23 Nov 2011 07:47:43 +0100
+ -- Stéphane Glondu <glondu@debian.org>  Wed, 23 Nov 2011 07:49:31 +0100
 
 babeld (1.2.0-1) unstable; urgency=low
 
