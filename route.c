@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2007, 2008 by Juliusz Chroboczek
+Copyright (c) 2007-2011 by Juliusz Chroboczek
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -30,7 +30,7 @@ THE SOFTWARE.
 #include "babeld.h"
 #include "util.h"
 #include "kernel.h"
-#include "network.h"
+#include "interface.h"
 #include "source.h"
 #include "neighbour.h"
 #include "route.h"
@@ -40,37 +40,159 @@ THE SOFTWARE.
 #include "configuration.h"
 #include "local.h"
 
-struct route *routes = NULL;
-int numroutes = 0, maxroutes = 0;
+struct route **routes = NULL;
+static int route_slots = 0, max_route_slots = 0;
 int kernel_metric = 0;
 int allow_duplicates = -1;
 int diversity_kind = DIVERSITY_NONE;
 int diversity_factor = 256;     /* in units of 1/256 */
 int keep_unfeasible = 0;
 
+/* We maintain a list of "slots", ordered by prefix.  Every slot
+   contains a linked list of the routes to this prefix, with the
+   installed route, if any, at the head of the list. */
+
+static int
+route_compare(const unsigned char *prefix, unsigned char plen,
+               struct route *route)
+{
+    int i = memcmp(prefix, route->src->prefix, 16);
+    if(i != 0)
+        return i;
+
+    if(plen < route->src->plen)
+        return -1;
+    else if(plen > route->src->plen)
+        return 1;
+    else
+        return 0;
+}
+
+/* Performs binary search, returns -1 in case of failure.  In the latter
+   case, new_return is the place where to insert the new element. */
+
+static int
+find_route_slot(const unsigned char *prefix, unsigned char plen,
+                int *new_return)
+{
+    int p, m, g, c;
+
+    if(route_slots < 1) {
+        if(new_return)
+            *new_return = 0;
+        return -1;
+    }
+
+    p = 0; g = route_slots - 1;
+
+    do {
+        m = (p + g) / 2;
+        c = route_compare(prefix, plen, routes[m]);
+        if(c == 0)
+            return m;
+        else if(c < 0)
+            g = m - 1;
+        else
+            p = m + 1;
+    } while(p <= g);
+
+    if(new_return)
+        *new_return = p;
+
+    return -1;
+}
+
 struct route *
 find_route(const unsigned char *prefix, unsigned char plen,
            struct neighbour *neigh, const unsigned char *nexthop)
 {
-    int i;
-    for(i = 0; i < numroutes; i++) {
-        if(routes[i].neigh == neigh &&
-           memcmp(routes[i].nexthop, nexthop, 16) == 0 &&
-           source_match(routes[i].src, prefix, plen))
-            return &routes[i];
+    struct route *route;
+    int i = find_route_slot(prefix, plen, NULL);
+
+    if(i < 0)
+        return NULL;
+
+    route = routes[i];
+
+    while(route) {
+        if(route->neigh == neigh && memcmp(route->nexthop, nexthop, 16) == 0)
+            return route;
+        route = route->next;
     }
+
     return NULL;
 }
 
 struct route *
 find_installed_route(const unsigned char *prefix, unsigned char plen)
 {
-    int i;
-    for(i = 0; i < numroutes; i++) {
-        if(routes[i].installed && source_match(routes[i].src, prefix, plen))
-            return &routes[i];
-    }
+    int i = find_route_slot(prefix, plen, NULL);
+
+    if(i >= 0 && routes[i]->installed)
+        return routes[i];
+
     return NULL;
+}
+
+/* Returns an overestimate of the number of installed routes. */
+int
+installed_routes_estimate(void)
+{
+    return route_slots;
+}
+
+static int
+resize_route_table(int new_slots)
+{
+    struct route **new_routes;
+    assert(new_slots >= route_slots);
+
+    if(new_slots == 0) {
+        new_routes = NULL;
+        free(routes);
+    } else {
+        new_routes = realloc(routes, new_slots * sizeof(struct route*));
+        if(new_routes == NULL)
+            return -1;
+    }
+
+    max_route_slots = new_slots;
+    routes = new_routes;
+    return 1;
+}
+
+/* Insert a route into the table.  If successful, retains the route.
+   On failure, caller must free the route. */
+static struct route *
+insert_route(struct route *route)
+{
+    int i, n;
+
+    assert(!route->installed);
+
+    i = find_route_slot(route->src->prefix, route->src->plen, &n);
+
+    if(i < 0) {
+        if(route_slots >= max_route_slots)
+            resize_route_table(max_route_slots < 1 ? 8 : 2 * max_route_slots);
+        if(route_slots >= max_route_slots)
+            return NULL;
+        route->next = NULL;
+        if(n < route_slots)
+            memmove(routes + n + 1, routes + n,
+                    (route_slots - n) * sizeof(struct route*));
+        route_slots++;
+        routes[n] = route;
+    } else {
+        struct route *r;
+        r = routes[i];
+        while(r->next)
+            r = r->next;
+        r->next = route;
+        route->next = NULL;
+    }
+
+    return route;
 }
 
 void
@@ -81,41 +203,69 @@ flush_route(struct route *route)
     unsigned oldmetric;
     int lost = 0;
 
-    i = route - routes;
-    assert(i >= 0 && i < numroutes);
-
     oldmetric = route_metric(route);
+    src = route->src;
 
     if(route->installed) {
         uninstall_route(route);
         lost = 1;
     }
 
+    i = find_route_slot(route->src->prefix, route->src->plen, NULL);
+    assert(i >= 0 && i < route_slots);
+
     local_notify_route(route, LOCAL_FLUSH);
 
-    src = route->src;
+    if(route == routes[i]) {
+        routes[i] = route->next;
+        route->next = NULL;
+        free(route);
 
-    if(i != numroutes - 1)
-        memcpy(routes + i, routes + numroutes - 1, sizeof(struct route));
-    numroutes--;
-    VALGRIND_MAKE_MEM_UNDEFINED(routes + numroutes, sizeof(struct route));
-
-    if(numroutes == 0) {
-        free(routes);
-        routes = NULL;
-        maxroutes = 0;
-    } else if(maxroutes > 8 && numroutes < maxroutes / 4) {
-        struct route *new_routes;
-        int n = maxroutes / 2;
-        new_routes = realloc(routes, n * sizeof(struct route));
-        if(new_routes != NULL) {
-            routes = new_routes;
-            maxroutes = n;
+        if(routes[i] == NULL) {
+            if(i < route_slots - 1)
+                memmove(routes + i, routes + i + 1,
+                        (route_slots - i - 1) * sizeof(struct route*));
+            routes[route_slots - 1] = NULL;
+            route_slots--;
         }
+
+        if(route_slots == 0)
+            resize_route_table(0);
+        else if(max_route_slots > 8 && route_slots < max_route_slots / 4)
+            resize_route_table(max_route_slots / 2);
+    } else {
+        struct route *r = routes[i];
+        while(r->next != route)
+            r = r->next;
+        r->next = route->next;
+        route->next = NULL;
+        free(route);
     }
 
     if(lost)
         route_lost(src, oldmetric);
+
+    release_source(src);
+}
+
+void
+flush_all_routes()
+{
+    int i;
+
+    /* Start from the end, to avoid shifting the table. */
+    i = route_slots - 1;
+    while(i >= 0) {
+        while(i < route_slots) {
+        /* Uninstall first, to avoid calling route_lost. */
+            if(routes[i]->installed)
+                uninstall_route(routes[0]);
+            flush_route(routes[i]);
+        }
+        i--;
+    }
+
+    check_sources_released();
 }
 
 void
@@ -124,28 +274,68 @@ flush_neighbour_routes(struct neighbour *neigh)
     int i;
 
     i = 0;
-    while(i < numroutes) {
-        if(routes[i].neigh == neigh) {
-            flush_route(&routes[i]);
-            continue;
+    while(i < route_slots) {
+        struct route *r;
+        r = routes[i];
+        while(r) {
+            if(r->neigh == neigh) {
+                flush_route(r);
+                goto again;
+            }
+            r = r->next;
         }
         i++;
+    again:
+        ;
     }
 }
 
 void
-flush_network_routes(struct network *net, int v4only)
+flush_interface_routes(struct interface *ifp, int v4only)
 {
     int i;
 
     i = 0;
-    while(i < numroutes) {
-        if(routes[i].neigh->network == net &&
-           (!v4only || v4mapped(routes[i].nexthop))) {
-           flush_route(&routes[i]);
-           continue;
+    while(i < route_slots) {
+        struct route *r;
+        r = routes[i];
+        while(r) {
+            if(r->neigh->ifp == ifp &&
+               (!v4only || v4mapped(r->nexthop))) {
+                flush_route(r);
+                goto again;
+            }
+            r = r->next;
         }
         i++;
+    again:
+        ;
+    }
+}
+
+/* Iterate a function over all routes. */
+void
+for_all_routes(void (*f)(struct route*, void*), void *closure)
+{
+    int i;
+
+    for(i = 0; i < route_slots; i++) {
+        struct route *r = routes[i];
+        while(r) {
+            (*f)(r, closure);
+            r = r->next;
+        }
+    }
+}
+
+void
+for_all_installed_routes(void (*f)(struct route*, void*), void *closure)
+{
+    int i;
+
+    for(i = 0; i < route_slots; i++) {
+        if(routes[i]->installed)
+            (*f)(routes[i], closure);
     }
 }
 
@@ -155,10 +345,28 @@ metric_to_kernel(int metric)
     return metric < INFINITY ? kernel_metric : KERNEL_INFINITY;
 }
 
+/* This is used to maintain the invariant that the installed route is at
+   the head of the list. */
+static void
+move_installed_route(struct route *route, int i)
+{
+    assert(i >= 0 && i < route_slots);
+    assert(route->installed);
+
+    if(route != routes[i]) {
+        struct route *r = routes[i];
+        while(r->next != route)
+            r = r->next;
+        r->next = route->next;
+        route->next = routes[i];
+        routes[i] = route;
+    }
+}
+
 void
 install_route(struct route *route)
 {
-    int rc;
+    int i, rc;
 
     if(route->installed)
         return;
@@ -167,9 +375,18 @@ install_route(struct route *route)
         fprintf(stderr, "WARNING: installing unfeasible route "
                 "(this shouldn't happen).");
 
+    i = find_route_slot(route->src->prefix, route->src->plen, NULL);
+    assert(i >= 0 && i < route_slots);
+
+    if(routes[i] != route && routes[i]->installed) {
+        fprintf(stderr, "WARNING: attempting to install duplicate route "
+                "(this shouldn't happen).");
+        return;
+    }
+
     rc = kernel_route(ROUTE_ADD, route->src->prefix, route->src->plen,
                       route->nexthop,
-                      route->neigh->network->ifindex,
+                      route->neigh->ifp->ifindex,
                       metric_to_kernel(route_metric(route)), NULL, 0, 0);
     if(rc < 0) {
         int save = errno;
@@ -178,6 +395,8 @@ install_route(struct route *route)
             return;
     }
     route->installed = 1;
+    move_installed_route(route, i);
+
     local_notify_route(route, LOCAL_CHANGE);
 }
 
@@ -191,7 +410,7 @@ uninstall_route(struct route *route)
 
     rc = kernel_route(ROUTE_FLUSH, route->src->prefix, route->src->plen,
                       route->nexthop,
-                      route->neigh->network->ifindex,
+                      route->neigh->ifp->ifindex,
                       metric_to_kernel(route_metric(route)), NULL, 0, 0);
     if(rc < 0)
         perror("kernel_route(FLUSH)");
@@ -222,9 +441,9 @@ switch_routes(struct route *old, struct route *new)
                 "(this shouldn't happen).");
 
     rc = kernel_route(ROUTE_MODIFY, old->src->prefix, old->src->plen,
-                      old->nexthop, old->neigh->network->ifindex,
+                      old->nexthop, old->neigh->ifp->ifindex,
                       metric_to_kernel(route_metric(old)),
-                      new->nexthop, new->neigh->network->ifindex,
+                      new->nexthop, new->neigh->ifp->ifindex,
                       metric_to_kernel(route_metric(new)));
     if(rc < 0) {
         perror("kernel_route(MODIFY)");
@@ -233,7 +452,8 @@ switch_routes(struct route *old, struct route *new)
 
     old->installed = 0;
     new->installed = 1;
-
+    move_installed_route(new, find_route_slot(new->src->prefix, new->src->plen,
+                                              NULL));
     local_notify_route(old, LOCAL_CHANGE);
     local_notify_route(new, LOCAL_CHANGE);
 }
@@ -251,9 +471,9 @@ change_route_metric(struct route *route,
     if(route->installed && old != new) {
         int rc;
         rc = kernel_route(ROUTE_MODIFY, route->src->prefix, route->src->plen,
-                          route->nexthop, route->neigh->network->ifindex,
+                          route->nexthop, route->neigh->ifp->ifindex,
                           old,
-                          route->nexthop, route->neigh->network->ifindex,
+                          route->nexthop, route->neigh->ifp->ifindex,
                           new);
         if(rc < 0) {
             perror("kernel_route(MODIFY metric)");
@@ -294,33 +514,33 @@ route_expired(struct route *route)
 static int
 channels_interfere(int ch1, int ch2)
 {
-    if(ch1 == NET_CHANNEL_NONINTERFERING || ch2 == NET_CHANNEL_NONINTERFERING)
+    if(ch1 == IF_CHANNEL_NONINTERFERING || ch2 == IF_CHANNEL_NONINTERFERING)
         return 0;
-    if(ch1 == NET_CHANNEL_INTERFERING || ch2 == NET_CHANNEL_INTERFERING)
+    if(ch1 == IF_CHANNEL_INTERFERING || ch2 == IF_CHANNEL_INTERFERING)
         return 1;
     return ch1 == ch2;
 }
 
 int
-route_interferes(struct route *route, struct network *net)
+route_interferes(struct route *route, struct interface *ifp)
 {
     switch(diversity_kind) {
     case DIVERSITY_NONE:
         return 1;
     case DIVERSITY_INTERFACE_1:
-        return route->neigh->network == net;
+        return route->neigh->ifp == ifp;
     case DIVERSITY_CHANNEL_1:
     case DIVERSITY_CHANNEL:
-        if(route->neigh->network == net)
+        if(route->neigh->ifp == ifp)
             return 1;
-        if(channels_interfere(net->channel, route->neigh->network->channel))
+        if(channels_interfere(ifp->channel, route->neigh->ifp->channel))
             return 1;
         if(diversity_kind == DIVERSITY_CHANNEL) {
             int i;
             for(i = 0; i < DIVERSITY_HOPS; i++) {
                 if(route->channels[i] == 0)
                     break;
-                if(channels_interfere(net->channel, route->channels[i]))
+                if(channels_interfere(ifp->channel, route->channels[i]))
                     return 1;
             }
         }
@@ -355,21 +575,22 @@ struct route *
 find_best_route(const unsigned char *prefix, unsigned char plen, int feasible,
                 struct neighbour *exclude)
 {
-    struct route *route = NULL;
-    int i;
+    struct route *route, *r;
+    int i = find_route_slot(prefix, plen, NULL);
 
-    for(i = 0; i < numroutes; i++) {
-        if(!source_match(routes[i].src, prefix, plen))
-            continue;
-        if(route_expired(&routes[i]))
-            continue;
-        if(feasible && !route_feasible(&routes[i]))
-            continue;
-        if(exclude && routes[i].neigh == exclude)
-            continue;
-        if(route && route_metric(route) <= route_metric(&routes[i]))
-            continue;
-        route = &routes[i];
+    if(i < 0)
+        return NULL;
+
+    route = routes[i];
+
+    r = route->next;
+    while(r) {
+        if(!route_expired(r) &&
+           (!feasible || route_feasible(r)) &&
+           (!exclude || r->neigh != exclude) &&
+           (route_metric(r) < route_metric(route)))
+            route = r;
+        r = r->next;
     }
     return route;
 }
@@ -391,7 +612,7 @@ update_route_metric(struct route *route)
         int add_metric = input_filter(route->src->id,
                                       route->src->prefix, route->src->plen,
                                       neigh->address,
-                                      neigh->network->ifindex);
+                                      neigh->ifp->ifindex);
         change_route_metric(route, route->refmetric,
                             neighbour_cost(route->neigh), add_metric);
         if(route_metric(route) != oldmetric)
@@ -408,11 +629,13 @@ update_neighbour_metric(struct neighbour *neigh, int changed)
     if(changed) {
         int i;
 
-        i = 0;
-        while(i < numroutes) {
-            if(routes[i].neigh == neigh)
-                update_route_metric(&routes[i]);
-            i++;
+        for(i = 0; i < route_slots; i++) {
+            struct route *r = routes[i];
+            while(r) {
+                if(r->neigh == neigh)
+                    update_route_metric(r);
+                r = r->next;
+            }
         }
     }
 
@@ -420,21 +643,24 @@ update_neighbour_metric(struct neighbour *neigh, int changed)
 }
 
 void
-update_network_metric(struct network *net)
+update_interface_metric(struct interface *ifp)
 {
     int i;
 
-    i = 0;
-    while(i < numroutes) {
-        if(routes[i].neigh->network == net)
-            update_route_metric(&routes[i]);
-        i++;
+    for(i = 0; i < route_slots; i++) {
+        struct route *r = routes[i];
+        while(r) {
+            if(r->neigh->ifp == ifp)
+                update_route_metric(r);
+            r = r->next;
+        }
     }
 }
 
 /* This is called whenever we receive an update. */
 struct route *
-update_route(const unsigned char *a, const unsigned char *p, unsigned char plen,
+update_route(const unsigned char *id,
+             const unsigned char *prefix, unsigned char plen,
              unsigned short seqno, unsigned short refmetric,
              unsigned short interval,
              struct neighbour *neigh, const unsigned char *nexthop,
@@ -446,27 +672,34 @@ update_route(const unsigned char *a, const unsigned char *p, unsigned char plen,
     int add_metric;
     int hold_time = MAX((4 * interval) / 100 + interval / 50, 15);
 
-    if(memcmp(a, myid, 8) == 0)
+    if(memcmp(id, myid, 8) == 0)
         return NULL;
 
-    if(martian_prefix(p, plen)) {
+    if(martian_prefix(prefix, plen)) {
         fprintf(stderr, "Rejecting martian route to %s through %s.\n",
-                format_prefix(p, plen), format_address(a));
+                format_prefix(prefix, plen), format_address(id));
         return NULL;
     }
 
-    add_metric = input_filter(a, p, plen,
-                              neigh->address, neigh->network->ifindex);
+    add_metric = input_filter(id, prefix, plen,
+                              neigh->address, neigh->ifp->ifindex);
     if(add_metric >= INFINITY)
         return NULL;
 
-    src = find_source(a, p, plen, 1, seqno);
+    route = find_route(prefix, plen, neigh, nexthop);
+
+    if(route && memcmp(route->src->id, id, 8) == 0)
+        /* Avoid scanning the source table. */
+        src = route->src;
+    else
+        src = find_source(id, prefix, plen, 1, seqno);
+
     if(src == NULL)
         return NULL;
 
     feasible = update_feasible(src, seqno, refmetric);
-    route = find_route(p, plen, neigh, nexthop);
     metric = MIN((int)refmetric + neighbour_cost(neigh) + add_metric, INFINITY);
+
     if(route) {
         struct source *oldsrc;
         unsigned short oldmetric;
@@ -492,7 +725,7 @@ update_route(const unsigned char *a, const unsigned char *p, unsigned char plen,
             }
         }
 
-        route->src = src;
+        route->src = retain_source(src);
         if((feasible || keep_unfeasible) && refmetric < INFINITY)
             route->time = now.tv_sec;
         route->seqno = seqno;
@@ -507,7 +740,10 @@ update_route(const unsigned char *a, const unsigned char *p, unsigned char plen,
         if(!feasible)
             send_unfeasible_request(neigh, route->installed && route_old(route),
                                     seqno, metric, src);
+        release_source(oldsrc);
     } else {
+        struct route *new_route;
+
         if(refmetric >= INFINITY)
             /* Somebody's retracting a route we never saw. */
             return NULL;
@@ -517,19 +753,13 @@ update_route(const unsigned char *a, const unsigned char *p, unsigned char plen,
                 return NULL;
         }
 
-        if(numroutes >= maxroutes) {
-            struct route *new_routes;
-            int n = maxroutes < 1 ? 8 : 2 * maxroutes;
-            new_routes = routes == NULL ?
-                malloc(n * sizeof(struct route)) :
-                realloc(routes, n * sizeof(struct route));
-            if(new_routes == NULL)
-                return NULL;
-            maxroutes = n;
-            routes = new_routes;
+        route = malloc(sizeof(struct route));
+        if(route == NULL) {
+            perror("malloc(route)");
+            return NULL;
         }
-        route = &routes[numroutes];
-        route->src = src;
+
+        route->src = retain_source(src);
         route->refmetric = refmetric;
         route->cost = neighbour_cost(neigh);
         route->add_metric = add_metric;
@@ -543,7 +773,13 @@ update_route(const unsigned char *a, const unsigned char *p, unsigned char plen,
         if(channels_len > 0)
             memcpy(&route->channels, channels,
                    MIN(channels_len, DIVERSITY_HOPS));
-        numroutes++;
+        route->next = NULL;
+        new_route = insert_route(route);
+        if(new_route == NULL) {
+            fprintf(stderr, "Couldn't insert route.\n");
+            free(route);
+            return NULL;
+        }
         local_notify_route(route, LOCAL_ADD);
         consider_route(route);
     }
@@ -602,13 +838,6 @@ consider_route(struct route *route)
     if(route_metric(installed) >= INFINITY)
         goto install;
 
-    if(route_metric(installed) >= route_metric(route) + 192)
-        goto install;
-
-    /* Avoid switching sources */
-    if(installed->src != route->src)
-        return;
-
     if(route_metric(installed) >= route_metric(route) + 64)
         goto install;
 
@@ -628,15 +857,18 @@ retract_neighbour_routes(struct neighbour *neigh)
 {
     int i;
 
-    i = 0;
-    while(i < numroutes) {
-        if(routes[i].neigh == neigh) {
-            if(routes[i].refmetric != INFINITY) {
-                unsigned short oldmetric = route_metric(&routes[i]);
-                    retract_route(&routes[i]);
+    for(i = 0; i < route_slots; i++) {
+        struct route *r = routes[i];
+        while(r) {
+            if(r->neigh == neigh) {
+                if(r->refmetric != INFINITY) {
+                    unsigned short oldmetric = route_metric(r);
+                    retract_route(r);
                     if(oldmetric != INFINITY)
-                        route_changed(&routes[i], routes[i].src, oldmetric);
+                        route_changed(r, r->src, oldmetric);
+                }
             }
+            r = r->next;
         }
         i++;
     }
@@ -743,30 +975,38 @@ route_lost(struct source *src, unsigned oldmetric)
     }
 }
 
+/* This is called periodically to flush old routes.  It will also send
+   requests for routes that are about to expire. */
 void
 expire_routes(void)
 {
+    struct route *r;
     int i;
 
     debugf("Expiring old routes.\n");
 
     i = 0;
-    while(i < numroutes) {
-        struct route *route = &routes[i];
+    while(i < route_slots) {
+        r = routes[i];
+        while(r) {
+            /* Protect against clock being stepped. */
+            if(r->time > now.tv_sec || route_old(r)) {
+                flush_route(r);
+                goto again;
+            }
 
-        if(route->time > now.tv_sec || /* clock stepped */
-           route_old(route)) {
-            flush_route(route);
-            continue;
-        }
+            update_route_metric(r);
 
-        update_route_metric(route);
-
-        if(route->installed && route->refmetric < INFINITY) {
-            if(route_old(route))
-                send_unicast_request(route->neigh,
-                                     route->src->prefix, route->src->plen);
+            if(r->installed && r->refmetric < INFINITY) {
+                if(route_old(r))
+                    /* Route about to expire, send a request. */
+                    send_unicast_request(r->neigh,
+                                         r->src->prefix, r->src->plen);
+            }
+            r = r->next;
         }
         i++;
+    again:
+        ;
     }
 }
