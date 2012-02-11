@@ -272,8 +272,6 @@ parse_packet(const unsigned char *from, struct interface *ifp,
             debugf("Received hello %d (%d) from %s on %s.\n",
                    seqno, interval,
                    format_address(from), ifp->name);
-            ifp->activity_time = now.tv_sec;
-            update_hello_interval(ifp);
             changed = update_neighbour(neigh, seqno, interval);
             update_neighbour_metric(neigh, changed);
             if(interval > 0)
@@ -735,11 +733,9 @@ send_hello_noupdate(struct interface *ifp, unsigned interval)
 void
 send_hello(struct interface *ifp)
 {
-    int changed;
-    changed = update_hello_interval(ifp);
     send_hello_noupdate(ifp, (ifp->hello_interval + 9) / 10);
     /* Send full IHU every 3 hellos, and marginal IHU each time */
-    if(changed || ifp->hello_seqno % 3 == 0)
+    if(ifp->hello_seqno % 3 == 0)
         send_ihu(NULL, ifp);
     else
         send_marginal_ihu(ifp);
@@ -927,7 +923,7 @@ void
 flushupdates(struct interface *ifp)
 {
     struct xroute *xroute;
-    struct route *route;
+    struct babel_route *route;
     const unsigned char *last_prefix = NULL;
     unsigned char last_plen = 0xFF;
     int i;
@@ -1093,8 +1089,8 @@ buffer_update(struct interface *ifp,
     ifp->num_buffered_updates++;
 }
 
-void
-buffer_update_callback(struct route *route, void *closure)
+static void
+buffer_update_callback(struct babel_route *route, void *closure)
 {
     buffer_update((struct interface*)closure,
                   route->src->prefix, route->src->plen);
@@ -1106,7 +1102,7 @@ send_update(struct interface *ifp, int urgent,
 {
     if(ifp == NULL) {
         struct interface *ifp_aux;
-        struct route *route;
+        struct babel_route *route;
         FOR_ALL_INTERFACES(ifp_aux)
             send_update(ifp_aux, urgent, prefix, plen);
         if(prefix) {
@@ -1130,12 +1126,10 @@ send_update(struct interface *ifp, int urgent,
             buffer_update(ifp, prefix, plen);
         }
     } else {
-        if(!interface_idle(ifp)) {
-            send_self_update(ifp);
-            if(!parasitic) {
-                debugf("Sending update to %s for any.\n", ifp->name);
-                for_all_installed_routes(buffer_update_callback, ifp);
-            }
+        send_self_update(ifp);
+        if(!parasitic) {
+            debugf("Sending update to %s for any.\n", ifp->name);
+            for_all_installed_routes(buffer_update_callback, ifp);
         }
         set_timeout(&ifp->update_timeout, ifp->update_interval);
         ifp->last_update_time = now.tv_sec;
@@ -1147,17 +1141,10 @@ void
 send_update_resend(struct interface *ifp,
                    const unsigned char *prefix, unsigned char plen)
 {
-    int delay;
-
     assert(prefix != NULL);
 
     send_update(ifp, 1, prefix, plen);
-
-    delay = 2000;
-    delay = MIN(delay, wireless_hello_interval / 2);
-    delay = MIN(delay, wired_hello_interval / 2);
-    delay = MAX(delay, 10);
-    record_resend(RESEND_UPDATE, prefix, plen, 0, 0, NULL, delay);
+    record_resend(RESEND_UPDATE, prefix, plen, 0, 0, NULL, resend_delay);
 }
 
 void
@@ -1213,10 +1200,8 @@ send_self_update(struct interface *ifp)
         return;
     }
 
-    if(!interface_idle(ifp)) {
-        debugf("Sending self update to %s.\n", ifp->name);
-        for_all_xroutes(send_xroute_update_callback, ifp);
-    }
+    debugf("Sending self update to %s.\n", ifp->name);
+    for_all_xroutes(send_xroute_update_callback, ifp);
 }
 
 void
@@ -1460,19 +1445,13 @@ send_request_resend(struct neighbour *neigh,
                     const unsigned char *prefix, unsigned char plen,
                     unsigned short seqno, unsigned char *id)
 {
-    int delay;
-
     if(neigh)
         send_unicast_multihop_request(neigh, prefix, plen, seqno, id, 127);
     else
         send_multihop_request(NULL, prefix, plen, seqno, id, 127);
 
-    delay = 2000;
-    delay = MIN(delay, wireless_hello_interval / 2);
-    delay = MIN(delay, wired_hello_interval / 2);
-    delay = MAX(delay, 10);
     record_resend(RESEND_REQUEST, prefix, plen, seqno, id,
-                  neigh ? neigh->ifp : NULL, delay);
+                  neigh ? neigh->ifp : NULL, resend_delay);
 }
 
 void
@@ -1481,7 +1460,7 @@ handle_request(struct neighbour *neigh, const unsigned char *prefix,
                unsigned short seqno, const unsigned char *id)
 {
     struct xroute *xroute;
-    struct route *route;
+    struct babel_route *route;
     struct neighbour *successor = NULL;
 
     xroute = find_xroute(prefix, plen);
@@ -1527,7 +1506,7 @@ handle_request(struct neighbour *neigh, const unsigned char *prefix,
     if(!successor || successor == neigh) {
         /* We were about to forward a request to its requestor.  Try to
            find a different neighbour to forward the request to. */
-        struct route *other_route;
+        struct babel_route *other_route;
 
         other_route = find_best_route(prefix, plen, 0, neigh);
         if(other_route && route_metric(other_route) < INFINITY)

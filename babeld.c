@@ -60,12 +60,11 @@ int debug = 0;
 
 time_t reboot_time;
 
-int idle_time = 320;
 int link_detect = 0;
 int all_wireless = 0;
-int wireless_hello_interval = -1;
-int wired_hello_interval = -1;
-int idle_hello_interval = -1;
+int default_wireless_hello_interval = -1;
+int default_wired_hello_interval = -1;
+int resend_delay = -1;
 int do_daemonise = 0;
 char *logfile = NULL, *pidfile = "/var/run/babeld.pid";
 
@@ -149,19 +148,15 @@ main(int argc, char **argv)
             protocol_port = atoi(optarg);
             break;
         case 'h':
-            wireless_hello_interval = parse_msec(optarg);
-            if(wireless_hello_interval <= 0 ||
-               wireless_hello_interval > 0xFFFF * 10)
+            default_wireless_hello_interval = parse_msec(optarg);
+            if(default_wireless_hello_interval <= 0 ||
+               default_wireless_hello_interval > 0xFFFF * 10)
                 goto usage;
             break;
         case 'H':
-            wired_hello_interval = parse_msec(optarg);
-            if(wired_hello_interval <= 0 || wired_hello_interval > 0xFFFF * 10)
-                goto usage;
-            break;
-        case 'i':
-            idle_hello_interval = parse_msec(optarg);
-            if(idle_hello_interval <= 0 || idle_hello_interval > 0xFFFF * 10)
+            default_wired_hello_interval = parse_msec(optarg);
+            if(default_wired_hello_interval <= 0 ||
+               default_wired_hello_interval > 0xFFFF * 10)
                 goto usage;
             break;
         case 'k':
@@ -267,13 +262,18 @@ main(int argc, char **argv)
                     "Warning: /etc/babel.conf exists, it will be ignored.\n");
     }
 
-    if(wireless_hello_interval <= 0)
-        wireless_hello_interval = 4000;
-    wireless_hello_interval = MAX(wireless_hello_interval, 5);
+    if(default_wireless_hello_interval <= 0)
+        default_wireless_hello_interval = 4000;
+    default_wireless_hello_interval = MAX(default_wireless_hello_interval, 5);
 
-    if(wired_hello_interval <= 0)
-        wired_hello_interval = 4000;
-    wired_hello_interval = MAX(wired_hello_interval, 5);
+    if(default_wired_hello_interval <= 0)
+        default_wired_hello_interval = 4000;
+    default_wired_hello_interval = MAX(default_wired_hello_interval, 5);
+
+    resend_delay = 2000;
+    resend_delay = MIN(resend_delay, default_wireless_hello_interval / 2);
+    resend_delay = MIN(resend_delay, default_wired_hello_interval / 2);
+    resend_delay = MAX(resend_delay, 20);
 
     if(parasitic && allow_duplicates >= 0) {
         /* Too difficult to get right. */
@@ -784,7 +784,7 @@ main(int argc, char **argv)
             "Syntax: %s "
             "[-m multicast_address] [-p port] [-S state-file]\n"
             "                "
-            "[-h hello] [-H wired_hello] [-i idle_hello] [-z kind[,factor]]\n"
+            "[-h hello] [-H wired_hello] [-z kind[,factor]]\n"
             "                "
             "[-k metric] [-A metric] [-s] [-P] [-l] [-w] [-u] [-g port]\n"
             "                "
@@ -919,7 +919,7 @@ init_signals(void)
 }
 
 static void
-dump_route_callback(struct route *route, void *closure)
+dump_route_callback(struct babel_route *route, void *closure)
 {
     FILE *out = (FILE*)closure;
     const unsigned char *nexthop =
