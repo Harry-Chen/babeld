@@ -938,17 +938,15 @@ route_changed(struct babel_route *route,
               struct source *oldsrc, unsigned short oldmetric)
 {
     if(route->installed) {
-        if(route_metric(route) > oldmetric) {
-            struct babel_route *better_route;
-            better_route =
-                find_best_route(route->src->prefix, route->src->plen, 1, NULL);
-            if(better_route &&
-               route_metric(better_route) <= route_metric(route) - 96)
-                consider_route(better_route);
-        }
+        struct babel_route *better_route;
+        /* Do this unconditionally -- microoptimisation is not worth it. */
+        better_route =
+            find_best_route(route->src->prefix, route->src->plen, 1, NULL);
+        if(better_route && route_metric(better_route) < route_metric(route))
+            consider_route(better_route);
 
         if(route->installed)
-            /* We didn't change routes after all. */
+            /* We didn't switch to the better route. */
             send_triggered_update(route, oldsrc, oldmetric);
     } else {
         /* Reconsider routes even when their metric didn't decrease,
@@ -966,12 +964,16 @@ route_lost(struct source *src, unsigned oldmetric)
     if(new_route) {
         consider_route(new_route);
     } else if(oldmetric < INFINITY) {
-        /* Complain loudly. */
+        /* Avoid creating a blackhole. */
         send_update_resend(NULL, src->prefix, src->plen);
-        send_request_resend(NULL, src->prefix, src->plen,
-                            src->metric >= INFINITY ?
-                            src->seqno : seqno_plus(src->seqno, 1),
-                            src->id);
+        /* If the route was usable enough, try to get an alternate one.
+           If it was not, we could be dealing with oscillations around
+           the value of INFINITY. */
+        if(oldmetric <= INFINITY / 2)
+            send_request_resend(NULL, src->prefix, src->plen,
+                                src->metric >= INFINITY ?
+                                src->seqno : seqno_plus(src->seqno, 1),
+                                src->id);
     }
 }
 

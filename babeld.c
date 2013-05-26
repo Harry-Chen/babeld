@@ -58,8 +58,6 @@ struct timeval now;
 unsigned char myid[8];
 int debug = 0;
 
-time_t reboot_time;
-
 int link_detect = 0;
 int all_wireless = 0;
 int default_wireless_hello_interval = -1;
@@ -169,9 +167,6 @@ main(int argc, char **argv)
             if(allow_duplicates < 0 || allow_duplicates > 0xFFFF)
                 goto usage;
             break;
-        case 'P':
-            parasitic = 1;
-            break;
         case 's':
             split_horizon = 0;
             break;
@@ -274,12 +269,6 @@ main(int argc, char **argv)
     resend_delay = MIN(resend_delay, default_wireless_hello_interval / 2);
     resend_delay = MIN(resend_delay, default_wired_hello_interval / 2);
     resend_delay = MAX(resend_delay, 20);
-
-    if(parasitic && allow_duplicates >= 0) {
-        /* Too difficult to get right. */
-        fprintf(stderr, "Sorry, -P and -A are incompatible.\n");
-        exit(1);
-    }
 
     if(do_daemonise) {
         if(logfile == NULL)
@@ -412,7 +401,6 @@ main(int argc, char **argv)
     myid[0] &= ~3;
 
  have_id:
-    reboot_time = now.tv_sec;
     myseqno = (random() & 0xFFFF);
 
     fd = open(state_file, O_RDONLY);
@@ -450,9 +438,6 @@ main(int argc, char **argv)
                         myseqno = seqno_plus(s, 1);
                     else
                         fprintf(stderr, "ID mismatch in babel-state.\n");
-                    /* Convert realtime into monotonic time. */
-                    if(t >= 1176800000L && t <= realnow.tv_sec)
-                        reboot_time = now.tv_sec - (realnow.tv_sec - t);
                 }
             } else {
                 fprintf(stderr, "Couldn't parse babel-state.\n");
@@ -786,7 +771,7 @@ main(int argc, char **argv)
             "                "
             "[-h hello] [-H wired_hello] [-z kind[,factor]]\n"
             "                "
-            "[-k metric] [-A metric] [-s] [-P] [-l] [-w] [-u] [-g port]\n"
+            "[-k metric] [-A metric] [-s] [-l] [-w] [-u] [-g port]\n"
             "                "
             "[-t table] [-T table] [-c file] [-C statement]\n"
             "                "
