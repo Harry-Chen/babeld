@@ -84,12 +84,9 @@ static int kernel_routes_changed = 0;
 static int kernel_link_changed = 0;
 static int kernel_addr_changed = 0;
 
-struct timeval check_neighbours_timeout;
+struct timeval check_neighbours_timeout, check_interfaces_timeout;
 
 static volatile sig_atomic_t exiting = 0, dumping = 0, reopening = 0;
-
-int local_server_socket = -1, local_socket = -1;
-int local_server_port = -1;
 
 static int kernel_routes_callback(int changed, void *closure);
 static void init_signals(void);
@@ -100,7 +97,7 @@ int
 main(int argc, char **argv)
 {
     struct sockaddr_in6 sin6;
-    int rc, fd, i, opt;
+    int rc, fd, i, opt, random_id = 0;
     time_t expiry_time, source_expiry_time, kernel_dump_time;
     char *config_file = NULL;
     void *vrc;
@@ -120,9 +117,10 @@ main(int argc, char **argv)
 
     parse_address("ff02:0:0:0:0:0:1:6", protocol_group, NULL);
     protocol_port = 6696;
+    change_smoothing_half_life(4);
 
     while(1) {
-        opt = getopt(argc, argv, "m:p:h:H:i:k:A:suS:d:g:lwz:t:T:c:C:DL:I:");
+        opt = getopt(argc, argv, "m:p:h:H:i:k:A:sruS:d:g:lwz:M:t:T:c:C:DL:I:");
         if(opt < 0)
             break;
 
@@ -172,6 +170,9 @@ main(int argc, char **argv)
         case 's':
             split_horizon = 0;
             break;
+        case 'r':
+            random_id = 1;
+            break;
         case 'u':
             keep_unfeasible = 1;
             break;
@@ -212,6 +213,13 @@ main(int argc, char **argv)
                     goto usage;
             }
             break;
+        case 'M': {
+            int l = parse_nat(optarg);
+            if(l < 0 || l > 3600)
+                goto usage;
+            change_smoothing_half_life(l);
+            break;
+        }
         case 't':
             export_table = parse_nat(optarg);
             if(export_table < 0 || export_table > 0xFFFF)
@@ -369,6 +377,9 @@ main(int argc, char **argv)
         goto fail;
     }
 
+    if(random_id)
+        goto random_id;
+
     FOR_ALL_INTERFACES(ifp) {
         /* ifp->ifindex is not necessarily valid at this point */
         int ifindex = if_nametoindex(ifp->name);
@@ -400,6 +411,7 @@ main(int argc, char **argv)
     fprintf(stderr,
             "Warning: couldn't find router id -- using random value.\n");
 
+ random_id:
     rc = read_random_bytes(myid, 8);
     if(rc < 0) {
         perror("read(random)");
@@ -444,7 +456,7 @@ main(int argc, char **argv)
                     gettimeofday(&realnow, NULL);
                     if(memcmp(sid, myid, 8) == 0)
                         myseqno = seqno_plus(s, 1);
-                    else
+                    else if(!random_id)
                         fprintf(stderr, "ID mismatch in babel-state.\n");
                 }
             } else {
@@ -475,18 +487,21 @@ main(int argc, char **argv)
     rc = resize_receive_buffer(1500);
     if(rc < 0)
         goto fail;
-    check_interfaces();
     if(receive_buffer == NULL)
         goto fail;
+
+    check_interfaces();
 
     rc = check_xroutes(0);
     if(rc < 0)
         fprintf(stderr, "Warning: couldn't check exported routes.\n");
+
     kernel_routes_changed = 0;
     kernel_link_changed = 0;
     kernel_addr_changed = 0;
     kernel_dump_time = now.tv_sec + roughly(30);
     schedule_neighbours_check(5000, 1);
+    schedule_interfaces_check(30000, 1);
     expiry_time = now.tv_sec + roughly(30);
     source_expiry_time = now.tv_sec + roughly(300);
 
@@ -524,6 +539,7 @@ main(int argc, char **argv)
         gettime(&now);
 
         tv = check_neighbours_timeout;
+        timeval_min(&tv, &check_interfaces_timeout);
         timeval_min_sec(&tv, expiry_time);
         timeval_min_sec(&tv, source_expiry_time);
         timeval_min_sec(&tv, kernel_dump_time);
@@ -549,12 +565,14 @@ main(int argc, char **argv)
                 maxfd = MAX(maxfd, kernel_socket);
             }
 #ifndef NO_LOCAL_INTERFACE
-            if(local_socket >= 0) {
-                FD_SET(local_socket, &readfds);
-                maxfd = MAX(maxfd, local_socket);
-            } else if(local_server_socket >= 0) {
+            if(local_server_socket >= 0 &&
+               num_local_sockets < MAX_LOCAL_SOCKETS) {
                 FD_SET(local_server_socket, &readfds);
                 maxfd = MAX(maxfd, local_server_socket);
+            }
+            for(i = 0; i < num_local_sockets; i++) {
+                FD_SET(local_sockets[i], &readfds);
+                maxfd = MAX(maxfd, local_sockets[i]);
             }
 #endif
             rc = select(maxfd + 1, &readfds, NULL, NULL, &tv);
@@ -603,27 +621,38 @@ main(int argc, char **argv)
 #ifndef NO_LOCAL_INTERFACE
         if(local_server_socket >= 0 &&
            FD_ISSET(local_server_socket, &readfds)) {
-            if(local_socket >= 0) {
-                close(local_socket);
-                local_socket = -1;
-            }
-            local_socket = accept(local_server_socket, NULL, NULL);
-            if(local_socket < 0) {
+            int s;
+            s = accept(local_server_socket, NULL, NULL);
+            if(s < 0) {
                 if(errno != EINTR && errno != EAGAIN)
                     perror("accept(local_server_socket)");
+            } else if(num_local_sockets >= MAX_LOCAL_SOCKETS) {
+                /* This should never happen, since we don't select for
+                   the server socket in this case.  But I'm paranoid. */
+                fprintf(stderr, "Internal error: too many local sockets.\n");
+                close(s);
             } else {
-                local_notify_all();
+                local_sockets[num_local_sockets++] = s;
+                local_notify_all_1(s);
             }
         }
 
-        if(local_socket >= 0 && FD_ISSET(local_socket, &readfds)) {
-            rc = local_read(local_socket);
-            if(rc <= 0) {
-                if(rc < 0)
-                    perror("read(local_socket)");
-                close(local_socket);
-                local_socket = -1;
+        i = 0;
+        while(i < num_local_sockets) {
+            if(FD_ISSET(local_sockets[i], &readfds)) {
+                rc = local_read(local_sockets[i]);
+                if(rc <= 0) {
+                    if(rc < 0) {
+                        if(errno == EINTR)
+                            continue;
+                        perror("read(local_socket)");
+                    }
+                    close(local_sockets[i]);
+                    local_sockets[i] = local_sockets[--num_local_sockets];
+                    continue;
+                }
             }
+            i++;
         }
 #endif
 
@@ -659,12 +688,17 @@ main(int argc, char **argv)
         if(timeval_compare(&check_neighbours_timeout, &now) < 0) {
             int msecs;
             msecs = check_neighbours();
-            msecs = MAX(msecs, 10);
+            /* Multiply by 3/2 to allow neighbours to expire. */
+            msecs = MAX(3 * msecs / 2, 10);
             schedule_neighbours_check(msecs, 1);
         }
 
-        if(now.tv_sec >= expiry_time) {
+        if(timeval_compare(&check_interfaces_timeout, &now) < 0) {
             check_interfaces();
+            schedule_interfaces_check(30000, 1);
+        }
+
+        if(now.tv_sec >= expiry_time) {
             expire_routes();
             expire_resend();
             expiry_time = now.tv_sec + roughly(30);
@@ -779,7 +813,7 @@ main(int argc, char **argv)
             "                "
             "[-h hello] [-H wired_hello] [-z kind[,factor]]\n"
             "                "
-            "[-k metric] [-A metric] [-s] [-l] [-w] [-u] [-g port]\n"
+            "[-k metric] [-A metric] [-s] [-l] [-w] [-r] [-u] [-g port]\n"
             "                "
             "[-t table] [-T table] [-c file] [-C statement]\n"
             "                "
@@ -803,17 +837,28 @@ main(int argc, char **argv)
     exit(1);
 }
 
-/* Schedule a neighbours check after roughly 3/2 times msecs have elapsed. */
 void
 schedule_neighbours_check(int msecs, int override)
 {
     struct timeval timeout;
 
-    timeval_add_msec(&timeout, &now, roughly(msecs * 3 / 2));
+    timeval_add_msec(&timeout, &now, roughly(msecs));
     if(override)
         check_neighbours_timeout = timeout;
     else
         timeval_min(&check_neighbours_timeout, &timeout);
+}
+
+void
+schedule_interfaces_check(int msecs, int override)
+{
+    struct timeval timeout;
+
+    timeval_add_msec(&timeout, &now, roughly(msecs));
+    if(override)
+        check_interfaces_timeout = timeout;
+    else
+        timeval_min(&check_interfaces_timeout, &timeout);
 }
 
 int
@@ -939,10 +984,10 @@ dump_route_callback(struct babel_route *route, void *closure)
             channels[0] = '\0';
     }
 
-    fprintf(out, "%s metric %d refmetric %d id %s seqno %d%s age %d "
+    fprintf(out, "%s metric %d (%d) refmetric %d id %s seqno %d%s age %d "
             "via %s neigh %s%s%s%s\n",
             format_prefix(route->src->prefix, route->src->plen),
-            route_metric(route), route->refmetric,
+            route_metric(route), route_smoothed_metric(route), route->refmetric,
             format_eui64(route->src->id),
             (int)route->seqno,
             channels,

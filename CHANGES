@@ -1,7 +1,17 @@
-26 May 2013: babeld-1.3.7
+3 May 2013: babeld-1.4.0
 
-  * Fix a bug that would cause the channel list to remain stuck at its
-    initial value when running with -z3.
+  * Change the route selection algorithm to used a smoothed metric in
+    addition to the "real" metric.  This reduces the amount of route
+    flapping without any special case hacks.
+  * New flag -r, use a random router-id.  This avoids temporarily
+    unreachable nodes after a reboot when persistent storage is not
+    available.
+  * INCOMPATIBLE CHANGE: the local interface now announces the local
+    hostname, and marks the end of the initial route dump.  (Thanks to
+    Gabriel Kerneis.)
+  * The local interface is now able to accept multiple simultaneous
+    connections.
+  * Detect BATMAN interfaces, don't assume they are wired.
 
 2 May 2013: babeld-1.3.6
 
