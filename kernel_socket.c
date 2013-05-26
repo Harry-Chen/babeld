@@ -108,6 +108,8 @@ get_sdl(struct sockaddr_dl *sdl, char *ifname)
         return -1;
 
     buffer = (char *)malloc(buf_len);
+    if(buffer == NULL)
+        return -1;
 
     rc = sysctl(mib, 6, buffer, &buf_len, NULL, 0);
     if(rc < 0)
@@ -143,8 +145,13 @@ fail:
         (a).s6_addr[3] = (i) & 0xff;            \
     } while (0)
 
+#if defined(__APPLE__)
 #define ROUNDUP(a) \
     ((a) > 0 ? (1 + (((a) - 1) | (sizeof(uint32_t) - 1))) : sizeof(uint32_t))
+#else
+#define ROUNDUP(a) \
+    ((a) > 0 ? (1 + (((a) - 1) | (sizeof(long) - 1))) : sizeof(long))
+#endif
 
 static int old_forwarding = -1;
 static int old_accept_redirects = -1;
@@ -153,17 +160,16 @@ static int ifindex_lo = -1;
 static int seq;
 
 static int
-mask2len(const struct in6_addr *addr)
+mask2len(const unsigned char *p, const int size)
 {
     int i = 0, j;
-    const u_char *p = (const u_char *)addr;
 
-    for(j = 0; j < 16; j++, p++) {
+    for(j = 0; j < size; j++, p++) {
         if(*p != 0xff)
             break;
         i += 8;
     }
-    if(j < 16) {
+    if(j < size) {
         switch(*p) {
 #define	MASKLEN(m, l)	case m: do { i += l; break; } while (0)
             MASKLEN(0xfe, 7); break;
@@ -231,7 +237,11 @@ kernel_setup(int setup)
 
     rc = 0;
     mib[2] = IPPROTO_ICMPV6;
+#if defined(IPV6CTL_SENDREDIRECTS)
+    mib[3] = IPV6CTL_SENDREDIRECTS;
+#else
     mib[3] = ICMPV6CTL_REDIRACCEPT;
+#endif
     datasize = sizeof(old_accept_redirects);
     if (setup)
         rc = sysctl(mib, 4, &old_accept_redirects, &datasize,
@@ -381,11 +391,12 @@ kernel_route(int operation, const unsigned char *dest, unsigned short plen,
              const unsigned char *newgate, int newifindex,
              unsigned int newmetric)
 {
-    unsigned char msg[512];
-    struct rt_msghdr *rtm;
-    struct sockaddr_in6 *sin6;
-    struct sockaddr_in *sin;
-    int rc, len, ipv4;
+    struct {
+      struct rt_msghdr m_rtm;
+      char m_space[512];
+    } msg;
+    char *data = msg.m_space;
+    int rc, ipv4;
 
     char local6[1][1][16] = IN6ADDR_LOOPBACK_INIT;
     char local4[1][1][16] =
@@ -412,7 +423,9 @@ kernel_route(int operation, const unsigned char *dest, unsigned short plen,
       return 0;
 
     if(operation == ROUTE_MODIFY) {
-        if(metric == KERNEL_INFINITY || newmetric == KERNEL_INFINITY) {
+        /* Do not use ROUTE_MODIFY when changing to a neighbour.
+           It is the only way to remove the "gateway" flag. */
+        if(ipv4 && plen == 128 && memcmp(dest, newgate, 16) == 0) {
             kernel_route(ROUTE_FLUSH, dest, plen,
                          gate, ifindex, metric,
                          NULL, 0, 0);
@@ -435,103 +448,107 @@ kernel_route(int operation, const unsigned char *dest, unsigned short plen,
     if(kernel_socket < 0) kernel_setup_socket(1);
 
     memset(&msg, 0, sizeof(msg));
-    rtm = (struct rt_msghdr *)msg;
-    rtm->rtm_version = RTM_VERSION;
+    msg.m_rtm.rtm_version = RTM_VERSION;
     switch(operation) {
     case ROUTE_FLUSH:
-        rtm->rtm_type = RTM_DELETE; break;
+        msg.m_rtm.rtm_type = RTM_DELETE; break;
     case ROUTE_ADD:
-        rtm->rtm_type = RTM_ADD; break;
-    case ROUTE_MODIFY: 
-        rtm->rtm_type = RTM_CHANGE; break;
-    default: 
+        msg.m_rtm.rtm_type = RTM_ADD; break;
+    case ROUTE_MODIFY:
+        msg.m_rtm.rtm_type = RTM_CHANGE; break;
+    default:
         return -1;
     };
-    rtm->rtm_index = ifindex;
-    rtm->rtm_flags = RTF_UP | RTF_PROTO2;
-    if(plen == 128) rtm->rtm_flags |= RTF_HOST;
-    /*     if(memcmp(nexthop->id, dest, 16) == 0) { */
-    /*         rtm -> rtm_flags |= RTF_LLINFO; */
-    /*         rtm -> rtm_flags |= RTF_CLONING; */
-    /*     } else { */
-    rtm->rtm_flags |= RTF_GATEWAY;
-    /*     } */
+    msg.m_rtm.rtm_index = ifindex;
+    msg.m_rtm.rtm_flags = RTF_UP;
+    if(plen == 128) msg.m_rtm.rtm_flags |= RTF_HOST;
     if(metric == KERNEL_INFINITY) {
-        rtm->rtm_flags |= RTF_BLACKHOLE;
+        msg.m_rtm.rtm_flags |= RTF_BLACKHOLE;
         if(ifindex_lo < 0) {
             ifindex_lo = if_nametoindex("lo0");
             if(ifindex_lo <= 0)
                 return -1;
         }
-        rtm->rtm_index = ifindex_lo;      
+        msg.m_rtm.rtm_index = ifindex_lo;
     }
-    rtm->rtm_seq = ++seq;
-    rtm->rtm_addrs = RTA_DST | RTA_GATEWAY;
-    if(!(operation == ROUTE_MODIFY && plen == 128)) {
-        rtm->rtm_addrs |= RTA_NETMASK;
-    }
+    msg.m_rtm.rtm_seq = ++seq;
+    msg.m_rtm.rtm_addrs = RTA_DST | RTA_GATEWAY;
+    if(plen != 128) msg.m_rtm.rtm_addrs |= RTA_NETMASK;
 
-#define push_sockaddr_in(ptr, offset) \
-    do { (ptr) = (struct sockaddr_in *)((char *)(ptr) + (offset)); \
-         (ptr)->sin_len = sizeof(struct sockaddr_in); \
-         (ptr)->sin_family = AF_INET; } while (0)
+#define PUSHEUI(ifindex) \
+    do { char ifname[IFNAMSIZ]; \
+         struct sockaddr_dl *sdl = (struct sockaddr_dl*) data; \
+         if(!if_indextoname((ifindex), ifname))  \
+             return -1; \
+         if(get_sdl(sdl, ifname) < 0)   \
+             return -1; \
+         data = data + ROUNDUP(sdl->sdl_len); \
+    } while (0)
 
-#define get_sin_addr(dst,src) \
-    do { memcpy((dst), (src) + 12, 4); } while (0)
+#define PUSHADDR(src) \
+    do { struct sockaddr_in *sin = (struct sockaddr_in*) data; \
+         sin->sin_len = sizeof(struct sockaddr_in);  \
+         sin->sin_family = AF_INET; \
+         memcpy(&sin->sin_addr, (src) + 12, 4); \
+         data = data + ROUNDUP(sin->sin_len); \
+    } while (0)
 
-#define push_sockaddr_in6(ptr, offset) \
-    do { (ptr) = (struct sockaddr_in6 *)((char *)(ptr) + (offset)); \
-         (ptr)->sin6_len = sizeof(struct sockaddr_in6); \
-         (ptr)->sin6_family = AF_INET6; } while (0)
-
-#define get_sin6_addr(dst,src) \
-    do { memcpy((dst), (src), 16); } while (0)
+#define PUSHADDR6(src) \
+    do { struct sockaddr_in6 *sin6 = (struct sockaddr_in6*) data; \
+         sin6->sin6_len = sizeof(struct sockaddr_in6); \
+         sin6->sin6_family = AF_INET6; \
+         memcpy(&sin6->sin6_addr, (src), 16); \
+         if(IN6_IS_ADDR_LINKLOCAL (&sin6->sin6_addr)) \
+            SET_IN6_LINKLOCAL_IFINDEX (sin6->sin6_addr, ifindex); \
+         data = data + ROUNDUP(sin6->sin6_len); \
+    } while (0)
 
     /* KAME ipv6 stack does not support IPv4 mapped IPv6, so we have to
      * duplicate the codepath */
     if(ipv4) {
-        sin = (struct sockaddr_in *)msg;
-        /* destination */
-        push_sockaddr_in(sin, sizeof(*rtm));
-        get_sin_addr(&(sin->sin_addr), dest);
-        /* gateway */
-        push_sockaddr_in(sin, ROUNDUP(sin->sin_len));
-        if (metric == KERNEL_INFINITY)
-            get_sin_addr(&(sin->sin_addr),**local4);
-        else
-            get_sin_addr(&(sin->sin_addr),gate);
-        /* netmask */
-        if((rtm->rtm_addrs | RTA_NETMASK) != 0) {
-            struct in6_addr tmp_sin6_addr;
-            push_sockaddr_in(sin, ROUNDUP(sin->sin_len));
-            plen2mask(plen, &tmp_sin6_addr);
-            get_sin_addr(&(sin->sin_addr), (char *)&tmp_sin6_addr);
-        }
-        len = (char *)sin + ROUNDUP(sin->sin_len) - (char *)msg;
-    } else {
-        sin6 = (struct sockaddr_in6 *)msg;
-        /* destination */
-        push_sockaddr_in6(sin6, sizeof(*rtm));
-        get_sin6_addr(&(sin6->sin6_addr), dest);
-        /* gateway */
-        push_sockaddr_in6(sin6, ROUNDUP(sin6->sin6_len));
-        if (metric == KERNEL_INFINITY)
-            get_sin6_addr(&(sin6->sin6_addr),**local6);
-        else
-            get_sin6_addr(&(sin6->sin6_addr),gate);
-        if(IN6_IS_ADDR_LINKLOCAL (&sin6->sin6_addr))
-            SET_IN6_LINKLOCAL_IFINDEX (sin6->sin6_addr, ifindex);
-        /* netmask */
-        if((rtm->rtm_addrs | RTA_NETMASK) != 0) {
-            push_sockaddr_in6(sin6, ROUNDUP(sin6->sin6_len));
-            plen2mask(plen, &sin6->sin6_addr);
-        }
-        len = (char *)sin6 + ROUNDUP(sin6->sin6_len) - (char *)msg;
-    }
-    rtm->rtm_msglen = len;
 
-    rc = write(kernel_socket, msg, rtm->rtm_msglen);
-    if (rc < rtm->rtm_msglen)
+        PUSHADDR(dest);
+        if (metric == KERNEL_INFINITY) {
+            PUSHADDR(**local4);
+        } else if(plen == 128 && memcmp(dest+12, gate+12, 4) == 0) {
+#if defined(RTF_CLONING)
+            msg.m_rtm.rtm_flags |= RTF_CLONING;
+#endif
+            PUSHEUI(ifindex);
+        } else {
+            msg.m_rtm.rtm_flags |= RTF_GATEWAY;
+            PUSHADDR(gate);
+        }
+        if((msg.m_rtm.rtm_addrs & RTA_NETMASK) != 0) {
+            struct in6_addr tmp_sin6_addr;
+            plen2mask(plen, &tmp_sin6_addr);
+            PUSHADDR((char *)&tmp_sin6_addr);
+        }
+
+    } else {
+
+        PUSHADDR6(dest);
+        if (metric == KERNEL_INFINITY) {
+            PUSHADDR6(**local6);
+        } else {
+            msg.m_rtm.rtm_flags |= RTF_GATEWAY;
+            PUSHADDR6(gate);
+        }
+        if((msg.m_rtm.rtm_addrs & RTA_NETMASK) != 0) {
+            struct in6_addr tmp_sin6_addr;
+            plen2mask(plen, &tmp_sin6_addr);
+            PUSHADDR6((char*)&tmp_sin6_addr);
+        }
+
+    }
+
+#undef PUSHEUI
+#undef PUSHADDR
+#undef PUSHADDR6
+
+    msg.m_rtm.rtm_msglen = data - (char *)&msg;
+    rc = write(kernel_socket, (char*)&msg, msg.m_rtm.rtm_msglen);
+    if (rc < msg.m_rtm.rtm_msglen)
         return -1;
 
     return 1;
@@ -561,6 +578,7 @@ parse_kernel_route(const struct rt_msghdr *rtm, struct kernel_route *route)
 {
     struct sockaddr *sa;
     void *rta = (void*)rtm + sizeof(struct rt_msghdr);
+    uint32_t excluded_flags = 0;
 
     if(ifindex_lo < 0) {
         ifindex_lo = if_nametoindex("lo0");
@@ -572,13 +590,14 @@ parse_kernel_route(const struct rt_msghdr *rtm, struct kernel_route *route)
     route->metric = 0;
     route->ifindex = rtm->rtm_index;
 
-    /* filter out kernel route (cache) */
-    if((rtm->rtm_flags & RTF_IFSCOPE) != 0)
-        return -1;
-
-    /* filter out our own route */
-    if((rtm->rtm_flags & RTF_PROTO2) != 0)
-        return -1;
+#if defined(RTF_IFSCOPE)
+    /* Filter out kernel route on OS X */
+    excluded_flags |= RTF_IFSCOPE;
+#endif
+#if defined(RTF_MULTICAST)
+    /* Filter out multicast route on others BSD */
+    excluded_flags |= RTF_MULTICAST;
+#endif
 
     /* Prefix */
     if(!(rtm->rtm_addrs & RTA_DST))
@@ -593,7 +612,7 @@ parse_kernel_route(const struct rt_msghdr *rtm, struct kernel_route *route)
            return -1;
     } else if(sa->sa_family == AF_INET) {
         struct sockaddr_in *sin = (struct sockaddr_in *)sa;
-#ifdef __APPLE__
+#if defined(IN_LINKLOCAL)
         if(IN_LINKLOCAL(ntohl(sin->sin_addr.s_addr)))
             return -1;
 #endif
@@ -628,8 +647,8 @@ parse_kernel_route(const struct rt_msghdr *rtm, struct kernel_route *route)
         sa = (struct sockaddr *)rta;
         rta += ROUNDUP(sa->sa_len);
         if(!v4mapped(route->prefix)) {
-              struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)sa;
-            route->plen = mask2len(sin6->sin6_addr.__u6_addr.__u6_addr8, 16);
+            struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)sa;
+            route->plen = mask2len((unsigned char*)&sin6->sin6_addr, 16);
         } else {
             struct sockaddr_in *sin = (struct sockaddr_in *)sa;
             route->plen = mask2len((unsigned char*)&sin->sin_addr, 4);
@@ -779,7 +798,7 @@ kernel_addresses(char *ifname, int ifindex, int ll,
             struct sockaddr_in *sin = (struct sockaddr_in*)ifap->ifa_addr;
             if(ll)
                 goto next;
-#ifdef __APPLE__
+#if defined(IN_LINKLOCAL)
             if(IN_LINKLOCAL(htonl(sin->sin_addr.s_addr)))
                 goto next;
 #endif
