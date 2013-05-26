@@ -568,7 +568,7 @@ kernel_setup(int setup)
 
         if(old_rp_filter >= 0) {
             rc = write_proc("/proc/sys/net/ipv4/conf/all/rp_filter",
-                            old_accept_redirects);
+                            old_rp_filter);
             if(rc < 0) {
                 perror("Couldn't write rp_filter knob.\n");
                 return -1;
@@ -712,6 +712,25 @@ isbridge(const char *ifname, int ifindex)
     return 0;
 }
 
+static int
+isbatman(const char *ifname, int ifindex)
+{
+    char buf[256];
+    int rc;
+
+    rc = snprintf(buf, 256, "/sys/devices/virtual/net/%s/mesh", ifname);
+    if(rc < 0 || rc >= 256)
+        return -1;
+
+    if(access(buf, F_OK) >= 0)
+        return 1;
+
+    if(errno != ENOENT)
+        return -1;
+
+    return 0;
+}
+
 int
 kernel_interface_wireless(const char *ifname, int ifindex)
 {
@@ -721,10 +740,8 @@ kernel_interface_wireless(const char *ifname, int ifindex)
     struct ifreq req;
     int rc;
 
-    if(isbridge(ifname, ifindex) != 0) {
-        /* Give up. */
+    if(isbridge(ifname, ifindex) != 0 || isbatman(ifname, ifindex) != 0)
         return -1;
-    }
 
     memset(&req, 0, sizeof(req));
     strncpy(req.ifr_name, ifname, sizeof(req.ifr_name));
@@ -864,43 +881,27 @@ kernel_route(int operation, const unsigned char *dest, unsigned short plen,
     ipv4 = v4mapped(gate);
 
     if(operation == ROUTE_MODIFY) {
-        int added;
         if(newmetric == metric && memcmp(newgate, gate, 16) == 0 &&
            newifindex == ifindex)
             return 0;
-        /* It is better to add the new route before removing the old
-           one, to avoid losing packets.  However, if the old and new
-           priorities are equal, this only works if the kernel supports
-           ECMP.  So we first try the "right" order, and fall back on
-           the "wrong" order if it fails with EEXIST. */
+        /* It would be better to add the new route before removing the
+           old one, to avoid losing packets.  However, this causes
+           problems with non-multipath kernels, which sometimes
+           silently fail the request, causing "stuck" routes.  Let's
+           stick with the naive approach, and hope that the window is
+           small enough to be negligible. */
+        kernel_route(ROUTE_FLUSH, dest, plen,
+                     gate, ifindex, metric,
+                     NULL, 0, 0);
         rc = kernel_route(ROUTE_ADD, dest, plen,
                           newgate, newifindex, newmetric,
                           NULL, 0, 0);
         if(rc < 0) {
-            if(errno != EEXIST)
-                return rc;
-            added = 0;
-        } else {
-            added = 1;
+            if(errno == EEXIST)
+                rc = 1;
+            /* Should we try to re-install the flushed route on failure?
+               Error handling is hard. */
         }
-
-        kernel_route(ROUTE_FLUSH, dest, plen,
-                     gate, ifindex, metric,
-                     NULL, 0, 0);
-
-        if(!added) {
-            rc = kernel_route(ROUTE_ADD, dest, plen,
-                              newgate, newifindex, newmetric,
-                              NULL, 0, 0);
-            if(rc < 0) {
-                if(errno == EEXIST)
-                    rc = 1;
-                /* In principle, we should try to re-install the flushed
-                   route on failure to preserve.  However, this should
-                   hopefully not matter much in practice. */
-            }
-        }
-
         return rc;
     }
 
@@ -1103,6 +1104,10 @@ filter_kernel_routes(struct nlmsghdr *nh, void *data)
         return 0;
 
     if(rtm->rtm_src_len != 0)
+        return 0;
+
+    /* Ignore cached routes, advertised by some kernels (linux 3.x). */
+    if(rtm->rtm_flags & RTM_F_CLONED)
         return 0;
 
     if(data)

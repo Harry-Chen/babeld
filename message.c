@@ -43,7 +43,6 @@ THE SOFTWARE.
 
 unsigned char packet_header[4] = {42, 2};
 
-int parasitic = 0;
 int split_horizon = 1;
 
 unsigned short myseqno = 0;
@@ -275,7 +274,8 @@ parse_packet(const unsigned char *from, struct interface *ifp,
             changed = update_neighbour(neigh, seqno, interval);
             update_neighbour_metric(neigh, changed);
             if(interval > 0)
-                schedule_neighbours_check(interval * 10, 0);
+                /* Multiply by 3/2 to allow hellos to expire. */
+                schedule_neighbours_check(interval * 15, 0);
         } else if(type == MESSAGE_IHU) {
             unsigned short txcost, interval;
             unsigned char address[16];
@@ -296,7 +296,8 @@ parse_packet(const unsigned char *from, struct interface *ifp,
                 neigh->ihu_interval = interval;
                 update_neighbour_metric(neigh, changed);
                 if(interval > 0)
-                    schedule_neighbours_check(interval * 10 * 3, 0);
+                    /* Multiply by 3/2 to allow neighbours to expire. */
+                    schedule_neighbours_check(interval * 45, 0);
             }
         } else if(type == MESSAGE_ROUTER_ID) {
             if(len < 10) {
@@ -1120,17 +1121,13 @@ send_update(struct interface *ifp, int urgent,
         return;
 
     if(prefix) {
-        if(!parasitic || find_xroute(prefix, plen)) {
-            debugf("Sending update to %s for %s.\n",
-                   ifp->name, format_prefix(prefix, plen));
-            buffer_update(ifp, prefix, plen);
-        }
+        debugf("Sending update to %s for %s.\n",
+               ifp->name, format_prefix(prefix, plen));
+        buffer_update(ifp, prefix, plen);
     } else {
         send_self_update(ifp);
-        if(!parasitic) {
-            debugf("Sending update to %s for any.\n", ifp->name);
-            for_all_installed_routes(buffer_update_callback, ifp);
-        }
+        debugf("Sending update to %s for any.\n", ifp->name);
+        for_all_installed_routes(buffer_update_callback, ifp);
         set_timeout(&ifp->update_timeout, ifp->update_interval);
         ifp->last_update_time = now.tv_sec;
     }

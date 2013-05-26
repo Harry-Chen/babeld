@@ -62,6 +62,11 @@ The value
 specifies by how much the cost of non-interfering routes is multiplied,
 in units of 1/256; the default is 128 (i.e. division by 2).
 .TP
+.BI \-M " half-time"
+Specify the half-time in seconds of the exponential decay used for
+smoothing metrics for performing route selection; the value 0 disables
+smoothing.  The default is 4s.
+.TP
 .BI \-k " priority"
 Specify the priority value used when installing routes into the kernel.
 The default is 0.
@@ -83,14 +88,16 @@ explicitly overridden in the configuration file.
 Do not perform split-horizon processing on wired interfaces.
 Split-horizon is not performed on wireless interfaces.
 .TP
+.B \-r
+Use a random router-id.  The default is to use persistent router-ids
+derived from the MAC address of the first interface, which is easier
+to debug and more reliably prevents routing loops but may sometimes
+cause a node to be unreachable for 120 seconds just after boot.
+.TP
 .B \-u
 Do not flush unfeasible (useless) routes.  This is useful in order to
 announce more information to a front-end (see
 .BR \-g ).
-.TP
-.B \-P
-Run in parasitic (passive) mode.  The daemon will only announce
-redistributed routes.
 .TP
 .BI \-d " level"
 Debug level.  A value of 1 requests a routing table dump at every

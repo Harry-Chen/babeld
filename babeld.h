@@ -87,7 +87,6 @@ extern int default_wireless_hello_interval, default_wired_hello_interval;
 extern int resend_delay;
 extern int link_detect;
 extern int all_wireless;
-extern int local_socket;
 
 extern unsigned char myid[8];
 
@@ -100,4 +99,5 @@ extern int kernel_socket;
 extern int max_request_hopcount;
 
 void schedule_neighbours_check(int msecs, int override);
+void schedule_interfaces_check(int msecs, int override);
 int resize_receive_buffer(int size);

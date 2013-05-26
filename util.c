@@ -27,6 +27,7 @@ THE SOFTWARE.
 #include <time.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <limits.h>
 
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -36,10 +37,15 @@ THE SOFTWARE.
 #include "babeld.h"
 #include "util.h"
 
-unsigned
-roughly(unsigned value)
+int
+roughly(int value)
 {
-    return value * 3 / 4 + random() % (value / 2);
+    if(value < 0)
+        return -roughly(-value);
+    else if(value <= 1)
+        return value;
+    else
+        return value * 3 / 4 + random() % (value / 2);
 }
 
 void
@@ -124,6 +130,26 @@ timeval_min_sec(struct timeval *d, time_t secs)
         d->tv_sec = secs;
         d->tv_usec = random() % 1000000;
     }
+}
+
+/* There's no good name for a positive int in C, call it nat. */
+int
+parse_nat(const char *string)
+{
+    long l;
+    char *end;
+
+    l = strtol(string, &end, 0);
+
+    while(*end == ' ' || *end == '\t')
+        end++;
+    if(*end != '\0')
+        return -1;
+
+    if(l < 0 || l > INT_MAX)
+        return -1;
+
+    return (int)l;
 }
 
 int
