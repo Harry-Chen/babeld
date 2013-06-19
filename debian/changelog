@@ -1,8 +1,9 @@
-babeld (1.4.2-1) UNRELEASED; urgency=low
+babeld (1.4.2-1) unstable; urgency=low
 
   * New upstream release
+  * Use canonical URLs in Vcs-* fields
 
- -- Stéphane Glondu <glondu@debian.org>  Wed, 19 Jun 2013 21:18:22 +0200
+ -- Stéphane Glondu <glondu@debian.org>  Wed, 19 Jun 2013 21:25:52 +0200
 
 babeld (1.4.1-1) unstable; urgency=low
 
