@@ -62,8 +62,6 @@ add_interface(char *ifname, struct interface_conf *if_conf)
 {
     struct interface *ifp;
 
-    assert(!if_conf || strcmp(ifname, if_conf->ifname) == 0);
-
     FOR_ALL_INTERFACES(ifp) {
         if(strcmp(ifp->name, ifname) == 0) {
             assert(if_conf == NULL);
@@ -77,7 +75,7 @@ add_interface(char *ifname, struct interface_conf *if_conf)
 
     memset(ifp, 0, sizeof(struct interface));
     strncpy(ifp->name, ifname, IF_NAMESIZE);
-    ifp->conf = if_conf;
+    ifp->conf = if_conf ? if_conf : default_interface_conf;
     ifp->bucket_time = now.tv_sec;
     ifp->bucket = BUCKET_TOKENS_MAX;
     ifp->hello_seqno = (random() & 0xFFFF);
