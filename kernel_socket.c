@@ -422,21 +422,17 @@ kernel_route(int operation, const unsigned char *dest, unsigned short plen,
        memcmp(newgate, gate, 16) == 0 && newifindex == ifindex)
       return 0;
 
+
     if(operation == ROUTE_MODIFY) {
-        /* Do not use ROUTE_MODIFY when changing to a neighbour.
-           It is the only way to remove the "gateway" flag. */
-        if(ipv4 && plen == 128 && memcmp(dest, newgate, 16) == 0) {
-            kernel_route(ROUTE_FLUSH, dest, plen,
-                         gate, ifindex, metric,
-                         NULL, 0, 0);
-            return kernel_route(ROUTE_ADD, dest, plen,
-                                newgate, newifindex, newmetric,
-                                NULL, 0, 0);
-        } else {
-            metric = newmetric;
-            gate = newgate;
-            ifindex = newifindex;
-        }
+
+        /* Avoid atomic route changes that is buggy on OS X. */
+        kernel_route(ROUTE_FLUSH, dest, plen,
+                     gate, ifindex, metric,
+                     NULL, 0, 0);
+        return kernel_route(ROUTE_ADD, dest, plen,
+                            newgate, newifindex, newmetric,
+                            NULL, 0, 0);
+
     }
 
     kdebugf("kernel_route: %s %s/%d metric %d dev %d nexthop %s\n",
@@ -460,7 +456,7 @@ kernel_route(int operation, const unsigned char *dest, unsigned short plen,
         return -1;
     };
     msg.m_rtm.rtm_index = ifindex;
-    msg.m_rtm.rtm_flags = RTF_UP;
+    msg.m_rtm.rtm_flags = RTF_UP | RTF_PROTO2;
     if(plen == 128) msg.m_rtm.rtm_flags |= RTF_HOST;
     if(metric == KERNEL_INFINITY) {
         msg.m_rtm.rtm_flags |= RTF_BLACKHOLE;
@@ -577,7 +573,7 @@ static int
 parse_kernel_route(const struct rt_msghdr *rtm, struct kernel_route *route)
 {
     struct sockaddr *sa;
-    void *rta = (void*)rtm + sizeof(struct rt_msghdr);
+    char *rta = (char*)rtm + sizeof(struct rt_msghdr);
     uint32_t excluded_flags = 0;
 
     if(ifindex_lo < 0) {
@@ -598,6 +594,10 @@ parse_kernel_route(const struct rt_msghdr *rtm, struct kernel_route *route)
     /* Filter out multicast route on others BSD */
     excluded_flags |= RTF_MULTICAST;
 #endif
+    /* Filter out our own route */
+    excluded_flags |= RTF_PROTO2;
+    if((rtm->rtm_flags & excluded_flags) != 0)
+        return -1;
 
     /* Prefix */
     if(!(rtm->rtm_addrs & RTA_DST))
@@ -639,7 +639,7 @@ parse_kernel_route(const struct rt_msghdr *rtm, struct kernel_route *route)
         struct sockaddr_in *sin = (struct sockaddr_in *)sa;
         v4tov6(route->gw, (unsigned char *)&sin->sin_addr);
     }
-    if(route->ifindex == ifindex_lo)
+    if((int)route->ifindex == ifindex_lo)
         return -1;
 
     /* Netmask */

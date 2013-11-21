@@ -555,18 +555,20 @@ add_ifconf(struct interface_conf *if_conf, struct interface_conf **if_confs)
         if_conf->next = NULL;
         *if_confs = if_conf;
     } else {
-        struct interface_conf *if_c;
-        if_c = *if_confs;
-        while(if_c->next) {
-            if(strcmp(if_c->ifname, if_conf->ifname) == 0) {
-                merge_ifconf(if_c, if_conf, if_c);
+        struct interface_conf *prev, *next;
+        next = *if_confs;
+        prev = NULL;
+        while(next) {
+            if(strcmp(next->ifname, if_conf->ifname) == 0) {
+                merge_ifconf(next, if_conf, next);
                 free(if_conf);
                 return;
             }
-            if_c = if_c->next;
+            prev = next;
+            next = next->next;
         }
         if_conf->next = NULL;
-        if_c->next = if_conf;
+        prev->next = if_conf;
     }
 }
 
@@ -604,6 +606,7 @@ parse_option(int c, gnc_t gnc, void *closure, char *token)
             abort();
     } else if(strcmp(token, "keep-unfeasible") == 0 ||
               strcmp(token, "link-detect") == 0 ||
+              strcmp(token, "random-id") == 0 ||
               strcmp(token, "daemonise") == 0) {
         int b;
         c = getbool(c, &b, gnc, closure);
@@ -614,6 +617,8 @@ parse_option(int c, gnc_t gnc, void *closure, char *token)
             keep_unfeasible = b;
         else if(strcmp(token, "link-detect") == 0)
             link_detect = b;
+        else if(strcmp(token, "random-id") == 0)
+            random_id = b;
         else if(strcmp(token, "daemonise") == 0)
             do_daemonise = b;
         else

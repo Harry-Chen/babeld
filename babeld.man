@@ -175,6 +175,11 @@ This specifies whether to keep unfeasible (useless) routes, and is
 equivalent to the command-line option
 .BR \-u .
 .TP
+.BR random-id " {" true | false }
+This specifies whether to use a random router-id, and is
+equivalent to the command-line option
+.BR \-r .
+.TP
 .BI debug " level"
 This specifies the debugging level, and is equivalent to the command-line
 option
@@ -229,7 +234,6 @@ equivalent to the command-line option
 This specifies whether to daemonize at startup, and is equivalent to
 the command-line option
 .BR \-D .
-.TP
 .TP
 .BI state-file " filename"
 This specifies the name of the file used for preserving long-term

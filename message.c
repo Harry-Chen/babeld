@@ -127,7 +127,7 @@ parse_route_attributes(const unsigned char *a, int alen,
 
     while(i < alen) {
         type = a[i];
-        if(type == 0) {
+        if(type == SUBTLV_PAD1) {
             i++;
             continue;
         }
@@ -142,9 +142,9 @@ parse_route_attributes(const unsigned char *a, int alen,
             return;
         }
 
-        if(type == 1) {
+        if(type == SUBTLV_PADN) {
             /* Nothing. */
-        } else if(type == 2) {
+        } else if(type == SUBTLV_DIVERSITY) {
             if(len > DIVERSITY_HOPS) {
                 fprintf(stderr,
                         "Received overlong channel information (%d > %d).\n",
@@ -348,7 +348,7 @@ parse_packet(const unsigned char *from, struct interface *ifp,
             DO_NTOHS(seqno, message + 8);
             DO_NTOHS(metric, message + 10);
             if(message[5] == 0 ||
-               (message[3] == 1 ? have_v4_prefix : have_v6_prefix))
+               (message[2] == 1 ? have_v4_prefix : have_v6_prefix))
                 rc = network_prefix(message[2], message[4], message[5],
                                     message + 12,
                                     message[2] == 1 ? v4_prefix : v6_prefix,
@@ -1293,7 +1293,7 @@ void
 send_request(struct interface *ifp,
              const unsigned char *prefix, unsigned char plen)
 {
-    int v4, len;
+    int v4, pb, len;
 
     if(ifp == NULL) {
         struct interface *ifp_auxn;
@@ -1314,16 +1314,17 @@ send_request(struct interface *ifp,
     debugf("sending request to %s for %s.\n",
            ifp->name, prefix ? format_prefix(prefix, plen) : "any");
     v4 = plen >= 96 && v4mapped(prefix);
-    len = !prefix ? 2 : v4 ? 6 : 18;
+    pb = v4 ? ((plen - 96) + 7) / 8 : (plen + 7) / 8;
+    len = !prefix ? 2 : 2 + pb;
 
     start_message(ifp, MESSAGE_REQUEST, len);
     accumulate_byte(ifp, !prefix ? 0 : v4 ? 1 : 2);
     accumulate_byte(ifp, !prefix ? 0 : v4 ? plen - 96 : plen);
     if(prefix) {
         if(v4)
-            accumulate_bytes(ifp, prefix + 12, 4);
+            accumulate_bytes(ifp, prefix + 12, pb);
         else
-            accumulate_bytes(ifp, prefix, 16);
+            accumulate_bytes(ifp, prefix, pb);
     }
     end_message(ifp, MESSAGE_REQUEST, len);
 }
@@ -1332,7 +1333,7 @@ void
 send_unicast_request(struct neighbour *neigh,
                      const unsigned char *prefix, unsigned char plen)
 {
-    int rc, v4, len;
+    int rc, v4, pb, len;
 
     /* make sure any buffered updates go out before this request. */
     flushupdates(neigh->ifp);
@@ -1341,7 +1342,8 @@ send_unicast_request(struct neighbour *neigh,
            format_address(neigh->address),
            prefix ? format_prefix(prefix, plen) : "any");
     v4 = plen >= 96 && v4mapped(prefix);
-    len = !prefix ? 2 : v4 ? 6 : 18;
+    pb = v4 ? ((plen - 96) + 7) / 8 : (plen + 7) / 8;
+    len = !prefix ? 2 : 2 + pb;
 
     rc = start_unicast_message(neigh, MESSAGE_REQUEST, len);
     if(rc < 0) return;
@@ -1349,9 +1351,9 @@ send_unicast_request(struct neighbour *neigh,
     accumulate_unicast_byte(neigh, !prefix ? 0 : v4 ? plen - 96 : plen);
     if(prefix) {
         if(v4)
-            accumulate_unicast_bytes(neigh, prefix + 12, 4);
+            accumulate_unicast_bytes(neigh, prefix + 12, pb);
         else
-            accumulate_unicast_bytes(neigh, prefix, 16);
+            accumulate_unicast_bytes(neigh, prefix, pb);
     }
     end_unicast_message(neigh, MESSAGE_REQUEST, len);
 }
