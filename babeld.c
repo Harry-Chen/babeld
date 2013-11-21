@@ -63,8 +63,9 @@ int all_wireless = 0;
 int default_wireless_hello_interval = -1;
 int default_wired_hello_interval = -1;
 int resend_delay = -1;
+int random_id = 0;
 int do_daemonise = 0;
-char *logfile = NULL,
+const char *logfile = NULL,
     *pidfile = "/var/run/babeld.pid",
     *state_file = "/var/lib/babel-state";
 
@@ -88,6 +89,7 @@ struct timeval check_neighbours_timeout, check_interfaces_timeout;
 
 static volatile sig_atomic_t exiting = 0, dumping = 0, reopening = 0;
 
+static int accept_local_connections(fd_set *readfds);
 static int kernel_routes_callback(int changed, void *closure);
 static void init_signals(void);
 static void dump_tables(FILE *out);
@@ -97,9 +99,9 @@ int
 main(int argc, char **argv)
 {
     struct sockaddr_in6 sin6;
-    int rc, fd, i, opt, random_id = 0;
+    int rc, fd, i, opt;
     time_t expiry_time, source_expiry_time, kernel_dump_time;
-    char *config_file = NULL;
+    const char *config_file = NULL;
     void *vrc;
     unsigned int seed;
     struct interface *ifp;
@@ -620,23 +622,7 @@ main(int argc, char **argv)
         }
 
 #ifndef NO_LOCAL_INTERFACE
-        if(local_server_socket >= 0 &&
-           FD_ISSET(local_server_socket, &readfds)) {
-            int s;
-            s = accept(local_server_socket, NULL, NULL);
-            if(s < 0) {
-                if(errno != EINTR && errno != EAGAIN)
-                    perror("accept(local_server_socket)");
-            } else if(num_local_sockets >= MAX_LOCAL_SOCKETS) {
-                /* This should never happen, since we don't select for
-                   the server socket in this case.  But I'm paranoid. */
-                fprintf(stderr, "Internal error: too many local sockets.\n");
-                close(s);
-            } else {
-                local_sockets[num_local_sockets++] = s;
-                local_notify_all_1(s);
-            }
-        }
+        accept_local_connections(&readfds);
 
         i = 0;
         while(i < num_local_sockets) {
@@ -836,6 +822,52 @@ main(int argc, char **argv)
     if(pidfile)
         unlink(pidfile);
     exit(1);
+}
+
+static int
+accept_local_connections(fd_set *readfds)
+{
+    int rc;
+
+    if(local_server_socket < 0 || !FD_ISSET(local_server_socket, readfds))
+        return 0;
+
+    int s;
+    s = accept(local_server_socket, NULL, NULL);
+
+    if(s < 0) {
+        if(errno != EINTR && errno != EAGAIN) {
+            perror("accept(local_server_socket)");
+            return -1;
+        }
+        return 0;
+    }
+
+    if(num_local_sockets >= MAX_LOCAL_SOCKETS) {
+        /* This should never happen, since we don't select for
+           the server socket in this case.  But I'm paranoid. */
+        fprintf(stderr, "Internal error: too many local sockets.\n");
+        close(s);
+        return -1;
+    }
+
+    rc = fcntl(s, F_GETFL, 0);
+    if(rc < 0) {
+        fprintf(stderr, "Unable to get flags of local socket.\n");
+        close(s);
+        return -1;
+    }
+
+    rc = fcntl(s, F_SETFL, (rc | O_NONBLOCK));
+    if(rc < 0) {
+        fprintf(stderr, "Unable to set flags of local socket.\n");
+        close(s);
+        return -1;
+    }
+
+    local_sockets[num_local_sockets++] = s;
+    local_notify_all_1(s);
+    return 1;
 }
 
 void

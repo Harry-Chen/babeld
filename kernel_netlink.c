@@ -631,7 +631,7 @@ get_old_if(const char *ifname)
 {
     int i;
     for(i = 0; i < num_old_if; i++)
-        if(strcmp(old_if->ifname, ifname) == 0)
+        if(strcmp(old_if[i].ifname, ifname) == 0)
             return i;
     if(num_old_if >= MAX_INTERFACES)
         return -1;
@@ -659,7 +659,7 @@ kernel_setup_interface(int setup, const char *ifname, int ifindex)
     if(setup) {
         if(i >= 0)
             old_if[i].rp_filter = read_proc(buf);
-        else
+        if(i < 0 || old_if[i].rp_filter < 0)
             fprintf(stderr,
                     "Warning: cannot save old configuration for %s.\n",
                     ifname);
