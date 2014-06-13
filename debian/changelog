@@ -1,6 +1,6 @@
 babeld (1.5.0-1) unstable; urgency=medium
 
-  * New upstream release
+  * New upstream release (Closes: #751436)
   * Bump Standards-Version to 3.9.5
 
  -- Stéphane Glondu <glondu@debian.org>  Fri, 13 Jun 2014 13:14:34 +0200
