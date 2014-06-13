@@ -305,6 +305,30 @@ interface_up(struct interface *ifp, int up)
             IF_CONF(ifp, update_interval) :
            ifp->hello_interval * 4;
 
+        ifp->rtt_decay =
+            IF_CONF(ifp, rtt_decay) > 0 ?
+            IF_CONF(ifp, rtt_decay) : 42;
+
+        ifp->rtt_min =
+            IF_CONF(ifp, rtt_min) > 0 ?
+            IF_CONF(ifp, rtt_min) : 10000;
+        ifp->rtt_max =
+            IF_CONF(ifp, rtt_max) > 0 ?
+            IF_CONF(ifp, rtt_max) : 120000;
+        if(ifp->rtt_max <= ifp->rtt_min) {
+            fprintf(stderr,
+                    "Uh, rtt-max is less than or equal to rtt-min (%d <= %d). "
+                    "Setting it to %d.\n", ifp->rtt_max, ifp->rtt_min,
+                    ifp->rtt_min + 10000);
+            ifp->rtt_max = ifp->rtt_min + 10000;
+        }
+        ifp->max_rtt_penalty = IF_CONF(ifp, max_rtt_penalty);
+
+        if(IF_CONF(ifp, enable_timestamps) == CONFIG_YES ||
+           (IF_CONF(ifp, enable_timestamps) == CONFIG_DEFAULT &&
+            ifp->max_rtt_penalty > 0))
+            ifp->flags |= IF_TIMESTAMPS;
+
         if(ifp->ll)
             free(ifp->ll);
         ifp->numll = 0;

@@ -28,21 +28,23 @@ THE SOFTWARE.
 /* Some versions of gcc seem to be buggy, and ignore the packed attribute.
    Disable this code until the issue is clarified. */
 /* #elif defined __GNUC__*/
-#elif 0
-struct __us { unsigned short x __attribute__((packed)); };
-#define DO_NTOHS(_d, _s) \
-    do { _d = ntohs(((const struct __us*)(_s))->x); } while(0)
-#define DO_HTONS(_d, _s) \
-    do { ((struct __us*)(_d))->x = htons(_s); } while(0)
 #else
 #define DO_NTOHS(_d, _s) \
     do { short _dd; \
          memcpy(&(_dd), (_s), 2); \
          _d = ntohs(_dd); } while(0)
+#define DO_NTOHL(_d, _s) \
+    do { int _dd; \
+         memcpy(&(_dd), (_s), 4); \
+         _d = ntohl(_dd); } while(0)
 #define DO_HTONS(_d, _s) \
     do { unsigned short _dd; \
          _dd = htons(_s); \
          memcpy((_d), &(_dd), 2); } while(0)
+#define DO_HTONL(_d, _s) \
+    do { unsigned _dd; \
+         _dd = htonl(_s); \
+         memcpy((_d), &(_dd), 4); } while(0)
 #endif
 
 static inline int
@@ -66,6 +68,14 @@ seqno_plus(unsigned short s, int plus)
     return ((s + plus) & 0xFFFF);
 }
 
+/* Returns a time in microseconds on 32 bits (thus modulo 2^32,
+   i.e. about 4295 seconds). */
+static inline unsigned int
+time_us(const struct timeval t)
+{
+    return (unsigned int) (t.tv_sec * 1000000 + t.tv_usec);
+}
+
 int roughly(int value);
 void timeval_minus(struct timeval *d,
                    const struct timeval *s1, const struct timeval *s2);
@@ -78,7 +88,7 @@ int timeval_compare(const struct timeval *s1, const struct timeval *s2)
 void timeval_min(struct timeval *d, const struct timeval *s);
 void timeval_min_sec(struct timeval *d, time_t secs);
 int parse_nat(const char *string) ATTRIBUTE ((pure));
-int parse_msec(const char *string) ATTRIBUTE ((pure));
+int parse_thousands(const char *string) ATTRIBUTE ((pure));
 void do_debugf(int level, const char *format, ...)
     ATTRIBUTE ((format (printf, 2, 3))) COLD;
 int in_prefix(const unsigned char *restrict address,
@@ -90,6 +100,7 @@ unsigned char *mask_prefix(unsigned char *restrict ret,
 const char *format_address(const unsigned char *address);
 const char *format_prefix(const unsigned char *address, unsigned char prefix);
 const char *format_eui64(const unsigned char *eui);
+const char *format_thousands(unsigned int value);
 int parse_address(const char *address, unsigned char *addr_r, int *af_r);
 int parse_net(const char *net, unsigned char *prefix_r, unsigned char *plen_r,
               int *af_r);
