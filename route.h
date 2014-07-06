@@ -44,6 +44,8 @@ struct babel_route {
     struct babel_route *next;
 };
 
+struct route_stream;
+
 extern struct babel_route **routes;
 extern int kernel_metric, allow_duplicates;
 extern int diversity_kind, diversity_factor;
@@ -76,11 +78,11 @@ void flush_route(struct babel_route *route);
 void flush_all_routes(void);
 void flush_neighbour_routes(struct neighbour *neigh);
 void flush_interface_routes(struct interface *ifp, int v4only);
-void for_all_routes(void (*f)(struct babel_route*, void*), void *closure);
-void for_all_installed_routes(void (*f)(struct babel_route*, void*), void *closure);
+struct route_stream *route_stream(int installed);
+struct babel_route *route_stream_next(struct route_stream *stream);
+void route_stream_done(struct route_stream *stream);
 void install_route(struct babel_route *route);
 void uninstall_route(struct babel_route *route);
-void switch_route(struct babel_route *old, struct babel_route *new);
 int route_feasible(struct babel_route *route);
 int route_old(struct babel_route *route);
 int route_expired(struct babel_route *route);
@@ -89,8 +91,9 @@ int update_feasible(struct source *src,
                     unsigned short seqno, unsigned short refmetric);
 void change_smoothing_half_life(int half_life);
 int route_smoothed_metric(struct babel_route *route);
-struct babel_route *find_best_route(const unsigned char *prefix, unsigned char plen,
-                              int feasible, struct neighbour *exclude);
+struct babel_route *find_best_route(const unsigned char *prefix,
+                                    unsigned char plen,
+                                    int feasible, struct neighbour *exclude);
 struct babel_route *install_best_route(const unsigned char prefix[16],
                                  unsigned char plen);
 void update_neighbour_metric(struct neighbour *neigh, int changed);

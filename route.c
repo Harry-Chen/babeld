@@ -57,7 +57,7 @@ static int two_to_the_one_over_hl = 0; /* 2^(1/hl) * 0x10000 */
 
 static int
 route_compare(const unsigned char *prefix, unsigned char plen,
-               struct babel_route *route)
+              struct babel_route *route)
 {
     int i = memcmp(prefix, route->src->prefix, 16);
     if(i != 0)
@@ -260,7 +260,7 @@ flush_all_routes()
     i = route_slots - 1;
     while(i >= 0) {
         while(i < route_slots) {
-        /* Uninstall first, to avoid calling route_lost. */
+            /* Uninstall first, to avoid calling route_lost. */
             if(routes[i]->installed)
                 uninstall_route(routes[i]);
             flush_route(routes[i]);
@@ -316,30 +316,58 @@ flush_interface_routes(struct interface *ifp, int v4only)
     }
 }
 
-/* Iterate a function over all routes. */
-void
-for_all_routes(void (*f)(struct babel_route*, void*), void *closure)
-{
-    int i, n = route_slots;
+struct route_stream {
+    int installed;
+    int index;
+    struct babel_route *next;
+};
 
-    for(i = 0; i < n; i++) {
-        struct babel_route *r = routes[i];
-        while(r) {
-            (*f)(r, closure);
-            r = r->next;
+
+struct route_stream *
+route_stream(int installed)
+{
+    struct route_stream *stream;
+
+    stream = malloc(sizeof(struct route_stream));
+    if(stream == NULL)
+        return NULL;
+
+    stream->installed = installed;
+    stream->index = installed ? 0 : -1;
+    stream->next = NULL;
+
+    return stream;
+}
+
+struct babel_route *
+route_stream_next(struct route_stream *stream)
+{
+    if(stream->installed) {
+        while(stream->index < route_slots && !routes[stream->index]->installed)
+            stream->index++;
+
+        if(stream->index < route_slots)
+            return routes[stream->index++];
+        else
+            return NULL;
+    } else {
+        struct babel_route *next;
+        if(!stream->next) {
+            stream->index++;
+            if(stream->index >= route_slots)
+                return NULL;
+            stream->next = routes[stream->index];
         }
+        next = stream->next;
+        stream->next = next->next;
+        return next;
     }
 }
 
 void
-for_all_installed_routes(void (*f)(struct babel_route*, void*), void *closure)
+route_stream_done(struct route_stream *stream)
 {
-    int i, n = route_slots;
-
-    for(i = 0; i < n; i++) {
-        if(routes[i]->installed)
-            (*f)(routes[i], closure);
-    }
+    free(stream);
 }
 
 static int
@@ -773,7 +801,7 @@ update_route(const unsigned char *id,
 
     if(martian_prefix(prefix, plen)) {
         fprintf(stderr, "Rejecting martian route to %s through %s.\n",
-                format_prefix(prefix, plen), format_address(id));
+                format_prefix(prefix, plen), format_address(nexthop));
         return NULL;
     }
 
@@ -812,9 +840,9 @@ update_route(const unsigned char *id,
             debugf("Unfeasible update for installed route to %s "
                    "(%s %d %d -> %s %d %d).\n",
                    format_prefix(src->prefix, src->plen),
-                   format_address(route->src->id),
+                   format_eui64(route->src->id),
                    route->seqno, route->refmetric,
-                   format_address(src->id), seqno, refmetric);
+                   format_eui64(src->id), seqno, refmetric);
             if(src != route->src) {
                 uninstall_route(route);
                 lost = 1;
