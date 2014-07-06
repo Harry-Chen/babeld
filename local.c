@@ -253,24 +253,14 @@ local_notify_route(struct babel_route *route, int kind)
         local_notify_route_1(local_sockets[i], route, kind);
 }
 
-static void
-local_notify_xroute_callback(struct xroute *xroute, void *closure)
-{
-    local_notify_xroute_1(*(int*)closure, xroute, LOCAL_ADD);
-}
-
-static void
-local_notify_route_callback(struct babel_route *route, void *closure)
-{
-    local_notify_route_1(*(int*)closure, route, LOCAL_ADD);
-}
-
 void
 local_notify_all_1(int s)
 {
     int rc;
     struct neighbour *neigh;
     const char *header = "BABEL 0.0\n";
+    struct xroute_stream *xroutes;
+    struct route_stream *routes;
 
     rc = write_timeout(s, header, strlen(header));
     if(rc < 0)
@@ -280,8 +270,29 @@ local_notify_all_1(int s)
     FOR_ALL_NEIGHBOURS(neigh) {
         local_notify_neighbour_1(s, neigh, LOCAL_ADD);
     }
-    for_all_xroutes(local_notify_xroute_callback, &s);
-    for_all_routes(local_notify_route_callback, &s);
+
+    xroutes = xroute_stream();
+    if(xroutes) {
+        while(1) {
+            struct xroute *xroute = xroute_stream_next(xroutes);
+            if(xroute == NULL)
+                break;
+            local_notify_xroute_1(s, xroute, LOCAL_ADD);
+        }
+        xroute_stream_done(xroutes);
+    }
+
+    routes = route_stream(0);
+    if(routes) {
+        while(1) {
+            struct babel_route *route = route_stream_next(routes);
+            if(route == NULL)
+                break;
+            local_notify_route_1(s, route, LOCAL_ADD);
+        }
+        route_stream_done(routes);
+    }
+
     rc = write_timeout(s, "done\n", 5);
     if(rc < 0)
         goto fail;

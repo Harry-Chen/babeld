@@ -89,7 +89,7 @@ network_prefix(int ae, int plen, unsigned int omitted,
             return -1;
         memcpy(prefix, v4prefix, 12);
         if(omitted) {
-            if (dp == NULL || !v4mapped(dp)) return -1;
+            if(dp == NULL || !v4mapped(dp)) return -1;
             memcpy(prefix, dp, 12 + omitted);
         }
         if(pb > omitted) memcpy(prefix + 12 + omitted, p, pb - omitted);
@@ -98,7 +98,7 @@ network_prefix(int ae, int plen, unsigned int omitted,
     case 2:
         if(omitted > 16 || (pb > omitted && len < pb - omitted)) return -1;
         if(omitted) {
-            if (dp == NULL || v4mapped(dp)) return -1;
+            if(dp == NULL || v4mapped(dp)) return -1;
             memcpy(prefix, dp, omitted);
         }
         if(pb > omitted) memcpy(prefix + omitted, p, pb - omitted);
@@ -159,7 +159,7 @@ parse_update_subtlv(const unsigned char *a, int alen,
             memset(channels, 0, DIVERSITY_HOPS);
             memcpy(channels, a + i + 2, len);
         } else {
-            fprintf(stderr, "Received unknown route attribute %d.\n", type);
+            debugf("Received unknown update sub-TLV %d.\n", type);
         }
 
         i += len + 2;
@@ -167,7 +167,8 @@ parse_update_subtlv(const unsigned char *a, int alen,
 }
 
 static int
-parse_hello_subtlv(const unsigned char *a, int alen, struct neighbour *neigh)
+parse_hello_subtlv(const unsigned char *a, int alen,
+                   unsigned int *hello_send_us)
 {
     int type, len, i = 0, ret = 0;
 
@@ -192,15 +193,14 @@ parse_hello_subtlv(const unsigned char *a, int alen, struct neighbour *neigh)
             /* Nothing to do. */
         } else if(type == SUBTLV_TIMESTAMP) {
             if(len >= 4) {
-                DO_NTOHL(neigh->hello_send_us, a + i + 2);
-                neigh->hello_rtt_receive_time = now;
+                DO_NTOHL(*hello_send_us, a + i + 2);
                 ret = 1;
             } else {
                 fprintf(stderr,
                         "Received incorrect RTT sub-TLV on Hello message.\n");
             }
         } else {
-            fprintf(stderr, "Received unknown Hello sub-TLV type %d.\n", type);
+            debugf("Received unknown Hello sub-TLV type %d.\n", type);
         }
 
         i += len + 2;
@@ -245,7 +245,7 @@ parse_ihu_subtlv(const unsigned char *a, int alen,
                         "Received incorrect RTT sub-TLV on IHU message.\n");
             }
         } else {
-            fprintf(stderr, "Received unknown IHU sub-TLV type %d.\n", type);
+            debugf("Received unknown IHU sub-TLV type %d.\n", type);
         }
 
         i += len + 2;
@@ -360,6 +360,7 @@ parse_packet(const unsigned char *from, struct interface *ifp,
         } else if(type == MESSAGE_HELLO) {
             unsigned short seqno, interval;
             int changed;
+            unsigned int timestamp;
             if(len < 6) goto fail;
             DO_NTOHS(seqno, message + 4);
             DO_NTOHS(interval, message + 6);
@@ -373,8 +374,11 @@ parse_packet(const unsigned char *from, struct interface *ifp,
                 schedule_neighbours_check(interval * 15, 0);
             /* Sub-TLV handling. */
             if(len > 8) {
-                if(parse_hello_subtlv(message + 8, len - 6, neigh) > 0)
+                if(parse_hello_subtlv(message + 8, len - 6, &timestamp) > 0) {
+                    neigh->hello_send_us = timestamp;
+                    neigh->hello_rtt_receive_time = now;
                     have_hello_rtt = 1;
+                }
             }
         } else if(type == MESSAGE_IHU) {
             unsigned short txcost, interval;
@@ -616,10 +620,10 @@ parse_packet(const unsigned char *from, struct interface *ifp,
                format_address(from), ifp->name, rtt);
 
         old_rttcost = neighbour_rttcost(neigh);
-        if (valid_rtt(neigh)) {
+        if(valid_rtt(neigh)) {
             /* Running exponential average. */
             smoothed_rtt = (ifp->rtt_decay * rtt +
-			    (256 - ifp->rtt_decay) * neigh->rtt);
+                            (256 - ifp->rtt_decay) * neigh->rtt);
             /* Rounding (up or down) to get closer to the sample. */
             neigh->rtt = (neigh->rtt >= rtt) ? smoothed_rtt / 256 :
                 (smoothed_rtt + 255) / 256;
@@ -1278,13 +1282,6 @@ buffer_update(struct interface *ifp,
     ifp->num_buffered_updates++;
 }
 
-static void
-buffer_update_callback(struct babel_route *route, void *closure)
-{
-    buffer_update((struct interface*)closure,
-                  route->src->prefix, route->src->plen);
-}
-
 void
 send_update(struct interface *ifp, int urgent,
             const unsigned char *prefix, unsigned char plen)
@@ -1313,9 +1310,21 @@ send_update(struct interface *ifp, int urgent,
                ifp->name, format_prefix(prefix, plen));
         buffer_update(ifp, prefix, plen);
     } else {
+        struct route_stream *routes;
         send_self_update(ifp);
         debugf("Sending update to %s for any.\n", ifp->name);
-        for_all_installed_routes(buffer_update_callback, ifp);
+        routes = route_stream(1);
+        if(routes) {
+            while(1) {
+                struct babel_route *route = route_stream_next(routes);
+                if(route == NULL)
+                    break;
+                buffer_update(ifp, route->src->prefix, route->src->plen);
+            }
+            route_stream_done(routes);
+        } else {
+            fprintf(stderr, "Couldn't allocate route stream.\n");
+        }
         set_timeout(&ifp->update_timeout, ifp->update_interval);
         ifp->last_update_time = now.tv_sec;
     }
@@ -1365,16 +1374,10 @@ update_myseqno()
     seqno_time = now;
 }
 
-static void
-send_xroute_update_callback(struct xroute *xroute, void *closure)
-{
-    struct interface *ifp = (struct interface*)closure;
-    send_update(ifp, 0, xroute->prefix, xroute->plen);
-}
-
 void
 send_self_update(struct interface *ifp)
 {
+    struct xroute_stream *xroutes;
     if(ifp == NULL) {
         struct interface *ifp_aux;
         FOR_ALL_INTERFACES(ifp_aux) {
@@ -1386,7 +1389,17 @@ send_self_update(struct interface *ifp)
     }
 
     debugf("Sending self update to %s.\n", ifp->name);
-    for_all_xroutes(send_xroute_update_callback, ifp);
+    xroutes = xroute_stream();
+    if(xroutes) {
+        while(1) {
+            struct xroute *xroute = xroute_stream_next(xroutes);
+            if(xroute == NULL) break;
+            send_update(ifp, 0, xroute->prefix, xroute->plen);
+        }
+        xroute_stream_done(xroutes);
+    } else {
+        fprintf(stderr, "Couldn't allocate xroute stream.\n");
+    }
 }
 
 void
@@ -1462,7 +1475,7 @@ send_ihu(struct neighbour *neigh, struct interface *ifp)
             accumulate_bytes(ifp, neigh->address + 8, 8);
         else
             accumulate_bytes(ifp, neigh->address, 16);
-        if (send_rtt_data) {
+        if(send_rtt_data) {
             accumulate_byte(ifp, SUBTLV_TIMESTAMP);
             accumulate_byte(ifp, 8);
             accumulate_int(ifp, neigh->hello_send_us);
@@ -1481,7 +1494,7 @@ send_ihu(struct neighbour *neigh, struct interface *ifp)
             accumulate_unicast_bytes(neigh, neigh->address + 8, 8);
         else
             accumulate_unicast_bytes(neigh, neigh->address, 16);
-        if (send_rtt_data) {
+        if(send_rtt_data) {
             accumulate_unicast_byte(neigh, SUBTLV_TIMESTAMP);
             accumulate_unicast_byte(neigh, 8);
             accumulate_unicast_int(neigh, neigh->hello_send_us);
