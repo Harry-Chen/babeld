@@ -90,6 +90,7 @@ extern int do_daemonise;
 extern const char *logfile, *pidfile, *state_file;
 extern int link_detect;
 extern int all_wireless;
+extern int has_ipv6_subtrees;
 
 extern unsigned char myid[8];
 
