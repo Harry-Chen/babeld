@@ -49,15 +49,15 @@ rt_cmp(const struct babel_route *rt1, const struct babel_route *rt2)
     enum prefix_status dst_st, src_st;
     const struct source *r1 = rt1->src, *r2 = rt2->src;
     dst_st = prefix_cmp(r1->prefix, r1->plen, r2->prefix, r2->plen);
-    if(dst_st & PST_MORE_SPECIFIC)
+    if(dst_st == PST_MORE_SPECIFIC)
         return -1;
-    else if(dst_st & PST_LESS_SPECIFIC)
+    else if(dst_st == PST_LESS_SPECIFIC)
         return 1;
     src_st = prefix_cmp(r1->src_prefix, r1->src_plen,
                         r2->src_prefix, r2->src_plen);
-    if(src_st & PST_MORE_SPECIFIC)
+    if(src_st == PST_MORE_SPECIFIC)
         return -1;
-    else if(src_st & PST_LESS_SPECIFIC)
+    else if(src_st == PST_LESS_SPECIFIC)
         return 1;
     return 0;
 }
@@ -65,9 +65,10 @@ rt_cmp(const struct babel_route *rt1, const struct babel_route *rt2)
 static const struct babel_route *
 min_route(const struct babel_route *r1, const struct babel_route *r2)
 {
+    int rc;
     if (!r1) return r2;
     if (!r2) return r1;
-    int rc = rt_cmp(r1, r2);
+    rc = rt_cmp(r1, r2);
     return rc <= 0 ? r1 : r2;
 }
 
@@ -77,7 +78,7 @@ conflicts(const struct babel_route *rt, const struct babel_route *rt1)
     enum prefix_status dst_st, src_st;
     const struct source *r = rt->src, *r1 = rt1->src;
     dst_st = prefix_cmp(r->prefix, r->plen, r1->prefix, r1->plen);
-    if(dst_st & (PST_DISJOINT | PST_EQUALS))
+    if(dst_st == PST_DISJOINT || dst_st == PST_EQUALS)
         return 0;
     src_st = prefix_cmp(r->src_prefix, r->src_plen,
                         r1->src_prefix, r1->src_plen);
@@ -104,20 +105,20 @@ inter(const struct babel_route *rt, const struct babel_route *rt1,
     enum prefix_status dst_st, src_st;
     const struct source *r = rt->src, *r1 = rt1->src;
     dst_st = prefix_cmp(r->prefix, r->plen, r1->prefix, r1->plen);
-    if(dst_st & PST_DISJOINT)
+    if(dst_st == PST_DISJOINT)
         return NULL;
     src_st = prefix_cmp(r->src_prefix, r->src_plen,
                         r1->src_prefix, r1->src_plen);
-    if(src_st & PST_DISJOINT)
+    if(src_st == PST_DISJOINT)
         return NULL;
-    if (dst_st & (PST_MORE_SPECIFIC | PST_EQUALS)) {
+    if (dst_st == PST_MORE_SPECIFIC || dst_st == PST_EQUALS) {
         zone->dst_prefix = r->prefix;
         zone->dst_plen = r->plen;
     } else {
         zone->dst_prefix = r1->prefix;
         zone->dst_plen = r1->plen;
     }
-    if (src_st & (PST_MORE_SPECIFIC | PST_EQUALS)) {
+    if (src_st == PST_MORE_SPECIFIC || src_st == PST_EQUALS) {
         zone->src_prefix = r->src_prefix;
         zone->src_plen = r->src_plen;
     } else {
@@ -131,9 +132,9 @@ static int
 zone_equal(const struct zone *z1, const struct zone *z2)
 {
     return z1 && z2 && z1->dst_plen == z2->dst_plen &&
-        memcmp(z1->dst_prefix, z2->dst_prefix, z1->dst_plen) == 0 &&
+        memcmp(z1->dst_prefix, z2->dst_prefix, 16) == 0 &&
         z1->src_plen == z2->src_plen &&
-        memcmp(z1->src_prefix, z2->src_prefix, z1->src_plen) == 0;
+        memcmp(z1->src_prefix, z2->src_prefix, 16) == 0;
 }
 
 static const struct babel_route *
@@ -265,7 +266,7 @@ kinstall_route(const struct babel_route *route)
            format_prefix(route->src->prefix, route->src->plen),
            format_prefix(route->src->src_prefix, route->src->src_plen));
     /* Install source-specific conflicting routes */
-    if(!has_ipv6_subtrees || v4) {
+    if(!kernel_disambiguate(v4)) {
         stream = route_stream(1);
         if(!stream) {
             fprintf(stderr, "Couldn't allocate route stream.\n");
@@ -329,7 +330,7 @@ kuninstall_route(const struct babel_route *route)
         perror("kernel_route(FLUSH)");
 
     /* Remove source-specific conflicting routes */
-    if(!has_ipv6_subtrees || v4) {
+    if(!kernel_disambiguate(v4)) {
         stream = route_stream(1);
         if(!stream) {
             fprintf(stderr, "Couldn't allocate route stream.\n");
@@ -375,7 +376,7 @@ kswitch_routes(const struct babel_route *old, const struct babel_route *new)
     }
 
     /* Remove source-specific conflicting routes */
-    if(!has_ipv6_subtrees || v4mapped(old->nexthop)) {
+    if(!kernel_disambiguate(v4mapped(old->nexthop))) {
         stream = route_stream(1);
         if(!stream) {
             fprintf(stderr, "Couldn't allocate route stream.\n");
@@ -422,7 +423,7 @@ kchange_route_metric(const struct babel_route *route,
         return -1;
     }
 
-    if(!has_ipv6_subtrees || v4mapped(route->nexthop)) {
+    if(!kernel_disambiguate(v4mapped(route->nexthop))) {
         stream = route_stream(1);
         if(!stream) {
             fprintf(stderr, "Couldn't allocate route stream.\n");

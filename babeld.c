@@ -123,6 +123,7 @@ main(int argc, char **argv)
     parse_address("ff02:0:0:0:0:0:1:6", protocol_group, NULL);
     protocol_port = 6696;
     change_smoothing_half_life(4);
+    has_ipv6_subtrees = kernel_has_ipv6_subtrees();
 
     while(1) {
         opt = getopt(argc, argv, "m:p:h:H:i:k:A:sruS:d:g:lwz:M:t:T:c:C:DL:I:");
@@ -843,12 +844,11 @@ main(int argc, char **argv)
 static int
 accept_local_connections(fd_set *readfds)
 {
-    int rc;
+    int rc, s;
 
     if(local_server_socket < 0 || !FD_ISSET(local_server_socket, readfds))
         return 0;
 
-    int s;
     s = accept(local_server_socket, NULL, NULL);
 
     if(s < 0) {
