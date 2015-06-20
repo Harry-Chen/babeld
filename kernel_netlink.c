@@ -41,7 +41,7 @@ THE SOFTWARE.
 #include <linux/rtnetlink.h>
 #include <linux/if_bridge.h>
 #include <linux/fib_rules.h>
-#include <netinet/ether.h>
+#include <net/if_arp.h>
 
 #if(__GLIBC__ < 2) || (__GLIBC__ == 2 && __GLIBC_MINOR__ <= 5)
 #define RTA_TABLE 15
@@ -74,6 +74,7 @@ int num_old_if = 0;
 static int dgram_socket = -1;
 
 #ifndef ARPHRD_ETHER
+#warning ARPHRD_ETHER not defined, we might not support exotic link layers
 #define ARPHRD_ETHER 1
 #define NO_ARPHRD
 #endif
@@ -917,6 +918,20 @@ kernel_interface_channel(const char *ifname, int ifindex)
         return -1;
 }
 
+/* Return true if we cannot handle disambiguation ourselves. */
+
+int
+kernel_disambiguate(int v4)
+{
+    return !v4 && has_ipv6_subtrees;
+}
+
+int
+kernel_has_ipv6_subtrees(void)
+{
+    return (kernel_older_than("Linux", 3, 11) == 0);
+}
+
 int
 kernel_route(int operation, const unsigned char *dest, unsigned short plen,
              const unsigned char *src, unsigned short src_plen,
@@ -994,7 +1009,7 @@ kernel_route(int operation, const unsigned char *dest, unsigned short plen,
 
     if(src_plen == 0) {
         table = export_table;
-    } else if(has_ipv6_subtrees && !ipv4) {
+    } else if(kernel_disambiguate(ipv4)) {
         table = export_table;
         use_src = 1;
     } else {
@@ -1093,6 +1108,8 @@ parse_kernel_route_rta(struct rtmsg *rtm, int len, struct kernel_route *route)
 {
     int table = rtm->rtm_table;
     struct rtattr *rta= RTM_RTA(rtm);;
+    int i;
+
     len -= NLMSG_ALIGN(sizeof(*rtm));
 
     memset(route, 0, sizeof(struct kernel_route));
@@ -1147,10 +1164,10 @@ parse_kernel_route_rta(struct rtmsg *rtm, int len, struct kernel_route *route)
 #undef COPY_ADDR
 #undef GET_PLEN
 
-    int i;
     for(i = 0; i < import_table_count; i++)
         if(table == import_tables[i])
             return 0;
+
     return -1;
 }
 
@@ -1839,7 +1856,7 @@ find_table(const unsigned char *src, unsigned short src_plen)
     int i, new_i;
 
     if(src_plen == 0 ||
-       (has_ipv6_subtrees && (src_plen < 96 || !v4mapped(src)))) {
+       (kernel_disambiguate(src_plen >= 96  && v4mapped(src)))) {
         fprintf(stderr, "Find_table called for route handled by kernel "
                 "(this shouldn't happen).");
         return -1;
@@ -1959,8 +1976,7 @@ filter_kernel_rules(struct nlmsghdr *nh, void *data)
         return 1;
 
     if(prefix_cmp(src, src_plen,
-                  kernel_tables[i].src, kernel_tables[i].plen)
-       == PST_EQUALS &&
+                  kernel_tables[i].src, kernel_tables[i].plen) == PST_EQUALS &&
        table == kernel_tables[i].table &&
        !rule_exists[i]) {
         rule_exists[i] = 1;
