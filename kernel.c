@@ -85,20 +85,22 @@ gettime(struct timeval *tv)
    caller will deal with gracefully. */
 
 int
-read_random_bytes(void *buf, size_t len)
+read_random_bytes(void *buf, int len)
 {
-    int fd;
-    int rc;
+    int fd, rc;
 
     fd = open("/dev/urandom", O_RDONLY);
     if(fd < 0) {
-        rc = -1;
-    } else {
-        rc = read(fd, buf, len);
-        if(rc < 0 || (unsigned)rc < len)
-            rc = -1;
-        close(fd);
+        errno = ENOSYS;
+        return -1;
     }
+
+    rc = read(fd, buf, len);
+    if(rc < len)
+        rc = -1;
+
+    close(fd);
+
     return rc;
 }
 

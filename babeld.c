@@ -56,6 +56,7 @@ THE SOFTWARE.
 struct timeval now;
 
 unsigned char myid[8];
+int have_id = 0;
 int debug = 0;
 
 int link_detect = 0;
@@ -126,7 +127,8 @@ main(int argc, char **argv)
     has_ipv6_subtrees = kernel_has_ipv6_subtrees();
 
     while(1) {
-        opt = getopt(argc, argv, "m:p:h:H:i:k:A:sruS:d:g:lwz:M:t:T:c:C:DL:I:");
+        opt = getopt(argc, argv,
+                     "m:p:h:H:i:k:A:srR:uS:d:g:lwz:M:t:T:c:C:DL:I:");
         if(opt < 0)
             break;
 
@@ -178,6 +180,12 @@ main(int argc, char **argv)
             break;
         case 'r':
             random_id = 1;
+            break;
+        case 'R':
+            rc = parse_eui64(optarg, myid);
+            if(rc < 0)
+                goto usage;
+            have_id = 1;
             break;
         case 'u':
             keep_unfeasible = 1;
@@ -395,50 +403,40 @@ main(int argc, char **argv)
         goto fail;
     }
 
-    if(random_id)
-        goto random_id;
+    if(!have_id && !random_id) {
+        /* We use all available interfaces here, since this increases the
+           chances of getting a stable router-id in case the set of Babel
+           interfaces changes. */
 
-    FOR_ALL_INTERFACES(ifp) {
-        /* ifp->ifindex is not necessarily valid at this point */
-        int ifindex = if_nametoindex(ifp->name);
-        if(ifindex > 0) {
+        for(i = 1; i < 256; i++) {
+            char buf[IF_NAMESIZE], *ifname;
             unsigned char eui[8];
-            rc = if_eui64(ifp->name, ifindex, eui);
+            ifname = if_indextoname(i, buf);
+            if(ifname == NULL)
+                continue;
+            rc = if_eui64(ifname, i, eui);
             if(rc < 0)
                 continue;
             memcpy(myid, eui, 8);
-            goto have_id;
+            have_id = 1;
+            break;
         }
     }
 
-    /* We failed to get a global EUI64 from the interfaces we were given.
-       Let's try to find an interface with a MAC address. */
-    for(i = 1; i < 256; i++) {
-        char buf[IF_NAMESIZE], *ifname;
-        unsigned char eui[8];
-        ifname = if_indextoname(i, buf);
-        if(ifname == NULL)
-            continue;
-        rc = if_eui64(ifname, i, eui);
-        if(rc < 0)
-            continue;
-        memcpy(myid, eui, 8);
-        goto have_id;
+    if(!have_id) {
+        if(!random_id)
+            fprintf(stderr,
+                    "Warning: couldn't find router id -- "
+                    "using random value.\n");
+        rc = read_random_bytes(myid, 8);
+        if(rc < 0) {
+            perror("read(random)");
+            goto fail;
+        }
+        /* Clear group and global bits */
+        myid[0] &= ~3;
     }
 
-    fprintf(stderr,
-            "Warning: couldn't find router id -- using random value.\n");
-
- random_id:
-    rc = read_random_bytes(myid, 8);
-    if(rc < 0) {
-        perror("read(random)");
-        goto fail;
-    }
-    /* Clear group and global bits */
-    myid[0] &= ~3;
-
- have_id:
     myseqno = (random() & 0xFFFF);
 
     fd = open(state_file, O_RDONLY);
@@ -453,30 +451,15 @@ main(int argc, char **argv)
     }
     if(fd >= 0) {
         char buf[100];
-        char buf2[100];
         int s;
-        long t;
         rc = read(fd, buf, 99);
         if(rc < 0) {
             perror("read(babel-state)");
         } else {
             buf[rc] = '\0';
-            rc = sscanf(buf, "%99s %d %ld\n", buf2, &s, &t);
-            if(rc == 3 && s >= 0 && s <= 0xFFFF) {
-                unsigned char sid[8];
-                rc = parse_eui64(buf2, sid);
-                if(rc < 0) {
-                    fprintf(stderr, "Couldn't parse babel-state.\n");
-                } else {
-                    struct timeval realnow;
-                    debugf("Got %s %d %ld from babel-state.\n",
-                           format_eui64(sid), s, t);
-                    gettimeofday(&realnow, NULL);
-                    if(memcmp(sid, myid, 8) == 0)
-                        myseqno = seqno_plus(s, 1);
-                    else if(!random_id)
-                        fprintf(stderr, "ID mismatch in babel-state.\n");
-                }
+            rc = sscanf(buf, "%d\n", &s);
+            if(rc == 1 && s >= 0 && s <= 0xFFFF) {
+                myseqno = seqno_plus(s, 1);
             } else {
                 fprintf(stderr, "Couldn't parse babel-state.\n");
             }
@@ -786,13 +769,9 @@ main(int argc, char **argv)
         perror("creat(babel-state)");
         unlink(state_file);
     } else {
-        struct timeval realnow;
-        char buf[100];
-        gettimeofday(&realnow, NULL);
-        rc = snprintf(buf, 100, "%s %d %ld\n",
-                      format_eui64(myid), (int)myseqno,
-                      (long)realnow.tv_sec);
-        if(rc < 0 || rc >= 100) {
+        char buf[10];
+        rc = snprintf(buf, 10, "%d\n", (int)myseqno);
+        if(rc < 0 || rc >= 10) {
             fprintf(stderr, "write(babel-state): overflow.\n");
             unlink(state_file);
         } else {
