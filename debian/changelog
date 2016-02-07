@@ -1,8 +1,10 @@
-babeld (1.7.0-1) UNRELEASED; urgency=medium
+babeld (1.7.0-1) unstable; urgency=medium
 
   * New upstream release
+  * Check presence of babeld.conf in init script (Closes: #797413)
+  * Update Vcs-*
 
- -- Stéphane Glondu <glondu@debian.org>  Sun, 07 Feb 2016 16:01:11 +0100
+ -- Stéphane Glondu <glondu@debian.org>  Sun, 07 Feb 2016 16:10:50 +0100
 
 babeld (1.6.1-1) unstable; urgency=medium
 
