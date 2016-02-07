@@ -1,8 +1,8 @@
-babeld (1.6.2-1) UNRELEASED; urgency=medium
+babeld (1.7.0-1) UNRELEASED; urgency=medium
 
   * New upstream release
 
- -- Stéphane Glondu <glondu@debian.org>  Tue, 22 Sep 2015 14:54:06 +0200
+ -- Stéphane Glondu <glondu@debian.org>  Sun, 07 Feb 2016 16:01:11 +0100
 
 babeld (1.6.1-1) unstable; urgency=medium
 
