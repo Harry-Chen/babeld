@@ -36,6 +36,34 @@ struct kernel_route {
     unsigned char gw[16];
 };
 
+struct kernel_addr {
+    struct in6_addr addr;
+    unsigned int ifindex;
+};
+
+struct kernel_link {
+    char *ifname;
+};
+
+struct kernel_rule {
+    unsigned int priority;
+    unsigned int table;
+    unsigned char src[16];
+    unsigned char src_plen;
+};
+
+struct kernel_filter {
+    /* return -1 to interrupt search. */
+    int (*addr)(struct kernel_addr *, void *);
+    void *addr_closure;
+    int (*route)(struct kernel_route *, void *);
+    void *route_closure;
+    int (*link)(struct kernel_link *, void *);
+    void *link_closure;
+    int (*rule)(struct kernel_rule *, void *);
+    void *rule_closure;
+};
+
 #define ROUTE_FLUSH 0
 #define ROUTE_ADD 1
 #define ROUTE_MODIFY 2
@@ -52,9 +80,6 @@ struct kernel_route {
 extern int export_table, import_tables[MAX_IMPORT_TABLES], import_table_count;
 
 int add_import_table(int table);
-#define SRC_TABLE_NUM 10
-extern int src_table_idx; /* number of the first table */
-extern int src_table_prio; /* first prio range */
 
 int kernel_setup(int setup);
 int kernel_setup_socket(int setup);
@@ -66,17 +91,21 @@ int kernel_interface_mtu(const char *ifname, int ifindex);
 int kernel_interface_wireless(const char *ifname, int ifindex);
 int kernel_interface_channel(const char *ifname, int ifindex);
 int kernel_disambiguate(int v4);
-int kernel_route(int operation, const unsigned char *dest, unsigned short plen,
+int kernel_route(int operation, int table,
+                 const unsigned char *dest, unsigned short plen,
                  const unsigned char *src, unsigned short src_plen,
                  const unsigned char *gate, int ifindex, unsigned int metric,
                  const unsigned char *newgate, int newifindex,
-                 unsigned int newmetric);
-int kernel_routes(struct kernel_route *routes, int maxroutes);
-int kernel_callback(int (*fn)(int, void*), void *closure);
-int kernel_addresses(char *ifname, int ifindex, int ll,
-                     struct kernel_route *routes, int maxroutes);
+                 unsigned int newmetric, int newtable);
+int kernel_dump(int operation, struct kernel_filter *filter);
+int kernel_callback(struct kernel_filter *filter);
 int if_eui64(char *ifname, int ifindex, unsigned char *eui);
 int gettime(struct timeval *tv);
 int read_random_bytes(void *buf, int len);
 int kernel_older_than(const char *sysname, int version, int sub_version);
 int kernel_has_ipv6_subtrees(void);
+int add_rule(int prio, const unsigned char *src_prefix, int src_plen,
+             int table);
+int flush_rule(int prio, int family);
+int change_rule(int new_prio, int old_prio, const unsigned char *src, int plen,
+                int table);

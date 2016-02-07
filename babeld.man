@@ -17,6 +17,9 @@ While it is optimised for wireless mesh networks, Babel will also work
 efficiently on wired networks.
 .SH OPTIONS
 .TP
+.BI \-V
+Display babeld's version and quit.
+.TP
 .BI \-m " multicast-address"
 Specify the link-local multicast address to be used by the protocol.
 The default is
@@ -93,11 +96,6 @@ Use a random router-id.  The default is to use persistent router-ids
 derived from the MAC address of the first interface, which is easier
 to debug and more reliably prevents routing loops but may sometimes
 cause a node to be unreachable for 120 seconds just after boot.
-.TP
-.BI \-R " router-id"
-Specify the router-id explicitly, as a modified EUI-64 or a MAC-48
-address.  If two nodes have the same router-id, bad things will happen.
-Don't use this option unless you know what you are doing.
 .TP
 .B \-u
 Do not flush unfeasible (useless) routes.  This is useful in order to
@@ -253,6 +251,16 @@ This specifies whether to daemonize at startup, and is equivalent to
 the command-line option
 .BR \-D .
 .TP
+.BR skip-kernel-setup " {" true | false }
+If this flag is set, no kernel (sysctl) setup is performed on startup. This can
+be useful when running in environments where system permissions prevent setting
+kernel parameters, for instance inside a Linux container.
+.TP
+.BI router-id " id"
+Specify the router-id explicitly, as a modified EUI-64 or a MAC-48
+address.  If two nodes have the same router-id, bad things will happen.
+Don't use this option unless you know what you are doing.
+.TP
 .BI state-file " filename"
 This specifies the name of the file used for preserving long-term
 information between invocations of the
@@ -405,8 +413,9 @@ A filtering rule is defined by a single line with the following format:
 specifies the filter to which this entry will be added, and can be one of
 .BR in ,
 .BR out ,
+.BR redistribute ,
 or
-.BR redistribute .
+.BR install .
 
 Each
 .I selector
@@ -493,6 +502,14 @@ For a redistribute filter, redistribute this route with metric
 .BI src-prefix " prefix"
 For a redistribute filter, set the source prefix of this route to
 .IR prefix .
+.TP
+.BI table " table"
+In an
+.B install
+filter, specify the kernel routing table to use.  For source-specific
+routes, this only works reliably for IPv6, and only when
+.B ipv6-subtrees
+is true.
 .PP
 If
 .I action

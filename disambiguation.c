@@ -34,6 +34,7 @@ THE SOFTWARE.
 #include "route.h"
 #include "source.h"
 #include "neighbour.h"
+#include "rule.h"
 
 struct zone {
     const unsigned char *dst_prefix;
@@ -66,8 +67,8 @@ static const struct babel_route *
 min_route(const struct babel_route *r1, const struct babel_route *r2)
 {
     int rc;
-    if (!r1) return r2;
-    if (!r2) return r1;
+    if(!r1) return r2;
+    if(!r2) return r1;
     rc = rt_cmp(r1, r2);
     return rc <= 0 ? r1 : r2;
 }
@@ -111,14 +112,14 @@ inter(const struct babel_route *rt, const struct babel_route *rt1,
                         r1->src_prefix, r1->src_plen);
     if(src_st == PST_DISJOINT)
         return NULL;
-    if (dst_st == PST_MORE_SPECIFIC || dst_st == PST_EQUALS) {
+    if(dst_st == PST_MORE_SPECIFIC || dst_st == PST_EQUALS) {
         zone->dst_prefix = r->prefix;
         zone->dst_plen = r->plen;
     } else {
         zone->dst_prefix = r1->prefix;
         zone->dst_plen = r1->plen;
     }
-    if (src_st == PST_MORE_SPECIFIC || src_st == PST_EQUALS) {
+    if(src_st == PST_MORE_SPECIFIC || src_st == PST_EQUALS) {
         zone->src_prefix = r->src_prefix;
         zone->src_plen = r->src_plen;
     } else {
@@ -144,7 +145,7 @@ min_conflict(const struct zone *zone, const struct babel_route *rt)
     const struct babel_route *min = NULL;
     struct route_stream *stream = NULL;
     struct zone curr_zone;
-    stream = route_stream(1);
+    stream = route_stream(ROUTE_INSTALLED);
     if(!stream) {
         fprintf(stderr, "Couldn't allocate route stream.\n");
         return NULL;
@@ -170,7 +171,8 @@ conflict_solution(const struct babel_route *rt)
     const struct babel_route *min = NULL; /* == solution */
     struct zone zone;
     struct zone tmp;
-    stream1 = route_stream(1);
+    /* Having a conflict requires at least one specific route. */
+    stream1 = route_stream(ROUTE_SS_INSTALLED);
     if(!stream1) {
         return NULL;
     }
@@ -178,7 +180,7 @@ conflict_solution(const struct babel_route *rt)
         rt1 = route_stream_next(stream1);
         if(rt1 == NULL) break;
 
-        stream2 = route_stream(1);
+        stream2 = route_stream(ROUTE_INSTALLED);
         if(!stream2) {
             route_stream_done(stream1);
             fprintf(stderr, "Couldn't allocate route stream.\n");
@@ -187,7 +189,7 @@ conflict_solution(const struct babel_route *rt)
 
         while(1) {
             rt2 = route_stream_next(stream2);
-            if (rt2 == NULL) break;
+            if(rt2 == NULL) break;
             if(!(conflicts(rt1, rt2) &&
                  zone_equal(inter(rt1, rt2, &tmp), to_zone(rt, &zone)) &&
                  rt_cmp(rt1, rt2) < 0))
@@ -211,45 +213,53 @@ is_installed(struct zone *zone)
 static int
 add_route(const struct zone *zone, const struct babel_route *route)
 {
-    return kernel_route(ROUTE_ADD, zone->dst_prefix, zone->dst_plen,
+    int table = find_table(zone->dst_prefix, zone->dst_plen,
+                           zone->src_prefix, zone->src_plen);
+    return kernel_route(ROUTE_ADD, table, zone->dst_prefix, zone->dst_plen,
                         zone->src_prefix, zone->src_plen,
                         route->nexthop,
                         route->neigh->ifp->ifindex,
-                        metric_to_kernel(route_metric(route)), NULL, 0, 0);
+                        metric_to_kernel(route_metric(route)), NULL, 0, 0, 0);
 }
 
 static int
 del_route(const struct zone *zone, const struct babel_route *route)
 {
-    return kernel_route(ROUTE_FLUSH, zone->dst_prefix, zone->dst_plen,
+    int table = find_table(zone->dst_prefix, zone->dst_plen,
+                           zone->src_prefix, zone->src_plen);
+    return kernel_route(ROUTE_FLUSH, table, zone->dst_prefix, zone->dst_plen,
                         zone->src_prefix, zone->src_plen,
                         route->nexthop,
                         route->neigh->ifp->ifindex,
-                        metric_to_kernel(route_metric(route)), NULL, 0, 0);
+                        metric_to_kernel(route_metric(route)), NULL, 0, 0, 0);
 }
 
 static int
 chg_route(const struct zone *zone, const struct babel_route *old,
           const struct babel_route *new)
 {
-    return kernel_route(ROUTE_MODIFY, zone->dst_prefix, zone->dst_plen,
+    int table = find_table(zone->dst_prefix, zone->dst_plen,
+                           zone->src_prefix, zone->src_plen);
+    return kernel_route(ROUTE_MODIFY, table, zone->dst_prefix, zone->dst_plen,
                         zone->src_prefix, zone->src_plen,
                         old->nexthop, old->neigh->ifp->ifindex,
                         metric_to_kernel(route_metric(old)),
                         new->nexthop, new->neigh->ifp->ifindex,
-                        metric_to_kernel(route_metric(new)));
+                        metric_to_kernel(route_metric(new)), table);
 }
 
 static int
 chg_route_metric(const struct zone *zone, const struct babel_route *route,
                  int old_metric, int new_metric)
 {
-    return kernel_route(ROUTE_MODIFY, zone->dst_prefix, zone->dst_plen,
+    int table = find_table(zone->dst_prefix, zone->dst_plen,
+                           zone->src_prefix, zone->src_plen);
+    return kernel_route(ROUTE_MODIFY, table, zone->dst_prefix, zone->dst_plen,
                         zone->src_prefix, zone->src_plen,
                         route->nexthop, route->neigh->ifp->ifindex,
                         old_metric,
                         route->nexthop, route->neigh->ifp->ifindex,
-                        new_metric);
+                        new_metric, table);
 }
 
 int
@@ -272,7 +282,7 @@ kinstall_route(const struct babel_route *route)
         goto end;
     }
 
-    stream = route_stream(1);
+    stream = route_stream(ROUTE_INSTALLED);
     if(!stream) {
         fprintf(stderr, "Couldn't allocate route stream.\n");
         return -1;
@@ -341,7 +351,7 @@ kuninstall_route(const struct babel_route *route)
         perror("kernel_route(FLUSH)");
 
     /* Remove source-specific conflicting routes */
-    stream = route_stream(1);
+    stream = route_stream(ROUTE_INSTALLED);
     if(!stream) {
         fprintf(stderr, "Couldn't allocate route stream.\n");
         return -1;
@@ -386,7 +396,7 @@ kswitch_routes(const struct babel_route *old, const struct babel_route *new)
 
     /* Remove source-specific conflicting routes */
     if(!kernel_disambiguate(v4mapped(old->nexthop))) {
-        stream = route_stream(1);
+        stream = route_stream(ROUTE_INSTALLED);
         if(!stream) {
             fprintf(stderr, "Couldn't allocate route stream.\n");
             return -1;
@@ -433,7 +443,7 @@ kchange_route_metric(const struct babel_route *route,
     }
 
     if(!kernel_disambiguate(v4mapped(route->nexthop))) {
-        stream = route_stream(1);
+        stream = route_stream(ROUTE_INSTALLED);
         if(!stream) {
             fprintf(stderr, "Couldn't allocate route stream.\n");
             return -1;

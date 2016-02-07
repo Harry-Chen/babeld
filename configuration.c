@@ -38,10 +38,12 @@ THE SOFTWARE.
 #include "route.h"
 #include "kernel.h"
 #include "configuration.h"
+#include "rule.h"
 
 struct filter *input_filters = NULL;
 struct filter *output_filters = NULL;
 struct filter *redistribute_filters = NULL;
+struct filter *install_filters = NULL;
 struct interface_conf *default_interface_conf = NULL;
 struct interface_conf *interface_confs = NULL;
 
@@ -403,6 +405,13 @@ parse_filter(int c, gnc_t gnc, void *closure, struct filter **filter_return)
                 goto error;
             if(af == AF_INET && filter->action.src_plen == 96)
                 memset(&filter->action.src_prefix, 0, 16);
+        } else if(strcmp(token, "table") == 0) {
+            int table;
+            c = getint(c, &table, gnc, closure);
+            if(c < -1) goto error;
+            if(table <= 0 || table > INFINITY)
+                goto error;
+            filter->action.table = table;
         } else {
             goto error;
         }
@@ -691,6 +700,7 @@ parse_option(int c, gnc_t gnc, void *closure, char *token)
               strcmp(token, "link-detect") == 0 ||
               strcmp(token, "random-id") == 0 ||
               strcmp(token, "daemonise") == 0 ||
+              strcmp(token, "skip-kernel-setup") == 0 ||
               strcmp(token, "ipv6-subtrees") == 0 ||
               strcmp(token, "reflect-kernel-metric") == 0) {
         int b;
@@ -706,6 +716,8 @@ parse_option(int c, gnc_t gnc, void *closure, char *token)
             random_id = b;
         else if(strcmp(token, "daemonise") == 0)
             do_daemonise = b;
+        else if(strcmp(token, "skip-kernel-setup") == 0)
+            skip_kernel_setup = b;
         else if(strcmp(token, "ipv6-subtrees") == 0)
             has_ipv6_subtrees = b;
         else if(strcmp(token, "reflect-kernel-metric") == 0)
@@ -779,6 +791,14 @@ parse_option(int c, gnc_t gnc, void *closure, char *token)
         if(c < -1 || n <= 0 || n + SRC_TABLE_NUM >= 32765)
             goto error;
         src_table_prio = n;
+    } else if(strcmp(token, "router-id") == 0) {
+        unsigned char *id = NULL;
+        c = getid(c, &id, gnc, closure);
+        if(c < -1 || id == NULL)
+            goto error;
+        memcpy(myid, id, 8);
+        free(id);
+        have_id = 1;
     } else {
         goto error;
     }
@@ -835,6 +855,12 @@ parse_config(gnc_t gnc, void *closure)
             if(c < -1)
                 return -1;
             add_filter(filter, &redistribute_filters);
+        } else if(strcmp(token, "install") == 0) {
+            struct filter *filter;
+            c = parse_filter(c, gnc, closure, &filter);
+            if(c < -1)
+                return -1;
+            add_filter(filter, &install_filters);
         } else if(strcmp(token, "interface") == 0) {
             struct interface_conf *if_conf;
             c = parse_ifconf(c, gnc, closure, &if_conf);
@@ -934,6 +960,7 @@ renumber_filters()
     renumber_filter(input_filters);
     renumber_filter(output_filters);
     renumber_filter(redistribute_filters);
+    renumber_filter(install_filters);
 }
 
 static int
@@ -1062,6 +1089,19 @@ redistribute_filter(const unsigned char *prefix, unsigned short plen,
     int res;
     res = do_filter(redistribute_filters, NULL, prefix, plen,
                     src_prefix, src_plen, NULL, ifindex, proto, result);
+    if(res < 0)
+        res = INFINITY;
+    return res;
+}
+
+int
+install_filter(const unsigned char *prefix, unsigned short plen,
+               const unsigned char *src_prefix, unsigned short src_plen,
+               struct filter_result *result)
+{
+    int res;
+    res = do_filter(install_filters, NULL, prefix, plen,
+                    src_prefix, src_plen, NULL, 0, 0, result);
     if(res < 0)
         res = INFINITY;
     return res;

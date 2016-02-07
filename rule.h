@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2007, 2008 by Juliusz Chroboczek
+Copyright (c) 2015 by Matthieu Boutier and Juliusz Chroboczek.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -20,28 +20,14 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-struct xroute {
-    unsigned char prefix[16];
-    unsigned char plen;
-    unsigned char src_prefix[16];
-    unsigned char src_plen;
-    unsigned short metric;
-    unsigned int ifindex;
-    int proto;
-};
+#define SRC_TABLE_NUM 10
 
-struct xroute_stream;
+extern int src_table_idx; /* number of the first table */
+extern int src_table_prio; /* first prio range */
 
-struct xroute *find_xroute(const unsigned char *prefix, unsigned char plen,
-                const unsigned char *src_prefix, unsigned char src_plen);
-void flush_xroute(struct xroute *xroute);
-int add_xroute(unsigned char prefix[16], unsigned char plen,
-               unsigned char src_prefix[16], unsigned char src_plen,
-               unsigned short metric, unsigned int ifindex, int proto);
-int xroutes_estimate(void);
-struct xroute_stream *xroute_stream();
-struct xroute *xroute_stream_next(struct xroute_stream *stream);
-void xroute_stream_done(struct xroute_stream *stream);
-int kernel_addresses(int ifindex, int ll,
-                     struct kernel_route *routes, int maxroutes);
-int check_xroutes(int send_updates);
+/* Return the number of the table using src_plen, allocate the table in the
+   kernel if necessary. */
+int find_table(const unsigned char *dest, unsigned short plen,
+               const unsigned char *src, unsigned short src_plen);
+void release_tables(void);
+int check_rules(void);

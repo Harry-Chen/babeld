@@ -214,6 +214,8 @@ kernel_setup(int setup)
     int mib[4];
     size_t datasize;
 
+    if(skip_kernel_setup) return 1;
+
     mib[0] = CTL_NET;
     mib[1] = AF_INET6;
     seq = time(NULL);
@@ -221,10 +223,14 @@ kernel_setup(int setup)
     mib[2] = IPPROTO_IPV6;
     mib[3] = IPV6CTL_FORWARDING;
     datasize = sizeof(old_forwarding);
-    if(setup)
-        rc = sysctl(mib, 4, &old_forwarding, &datasize,
-                    &forwarding, datasize);
-    else if(old_forwarding >= 0)
+    if(setup) {
+        rc = sysctl(mib, 4, &old_forwarding, &datasize, NULL, 0);
+        if(rc == 0 && old_forwarding != forwarding) {
+            rc = sysctl(mib, 4, &old_forwarding, &datasize,
+                        &forwarding, datasize);
+        }
+    }
+    else if(old_forwarding >= 0 && old_forwarding != forwarding)
         rc = sysctl(mib, 4, NULL, NULL,
                     &old_forwarding, datasize);
     if(rc == -1) {
@@ -240,10 +246,13 @@ kernel_setup(int setup)
     mib[3] = ICMPV6CTL_REDIRACCEPT;
 #endif
     datasize = sizeof(old_accept_redirects);
-    if(setup)
-        rc = sysctl(mib, 4, &old_accept_redirects, &datasize,
-                    &accept_redirects, datasize);
-    else if(old_accept_redirects >= 0)
+    if(setup) {
+        rc = sysctl(mib, 4, &old_accept_redirects, &datasize, NULL, 0);
+        if(rc == 0 && old_accept_redirects != accept_redirects) {
+            rc = sysctl(mib, 4, &old_accept_redirects, &datasize,
+                        &accept_redirects, datasize);
+        }
+    } else if(old_accept_redirects >= 0 && old_accept_redirects != accept_redirects)
         rc = sysctl(mib, 4, NULL, NULL,
                     &old_accept_redirects, datasize);
     if(rc == -1) {
@@ -395,11 +404,12 @@ kernel_has_ipv6_subtrees(void)
 }
 
 int
-kernel_route(int operation, const unsigned char *dest, unsigned short plen,
+kernel_route(int operation, int table,
+             const unsigned char *dest, unsigned short plen,
              const unsigned char *src, unsigned short src_plen,
              const unsigned char *gate, int ifindex, unsigned int metric,
              const unsigned char *newgate, int newifindex,
-             unsigned int newmetric)
+             unsigned int newmetric, int newtable)
 {
     struct {
         struct rt_msghdr m_rtm;
@@ -442,14 +452,14 @@ kernel_route(int operation, const unsigned char *dest, unsigned short plen,
     if(operation == ROUTE_MODIFY) {
 
         /* Avoid atomic route changes that is buggy on OS X. */
-        kernel_route(ROUTE_FLUSH, dest, plen,
+        kernel_route(ROUTE_FLUSH, table, dest, plen,
                      src, src_plen,
                      gate, ifindex, metric,
-                     NULL, 0, 0);
-        return kernel_route(ROUTE_ADD, dest, plen,
+                     NULL, 0, 0, 0);
+        return kernel_route(ROUTE_ADD, table, dest, plen,
                             src, src_plen,
                             newgate, newifindex, newmetric,
-                            NULL, 0, 0);
+                            NULL, 0, 0, 0);
 
     }
 
@@ -678,14 +688,13 @@ parse_kernel_route(const struct rt_msghdr *rtm, struct kernel_route *route)
     return 0;
 }
 
-int
-kernel_routes(struct kernel_route *routes, int maxroutes)
-{
+static int
+kernel_routes(struct kernel_filter *filter) {
     int mib[6];
     char *buf, *p;
     size_t len;
     struct rt_msghdr *rtm;
-    int rc, i;
+    int rc;
 
     mib[0] = CTL_NET;
     mib[1] = PF_ROUTE;
@@ -712,25 +721,23 @@ kernel_routes(struct kernel_route *routes, int maxroutes)
         goto fail;
     }
 
-    i = 0;
-    p = buf;
-    while(p < buf + len && i < maxroutes) {
+    for(p = buf; p < buf + len; p += rtm->rtm_msglen) {
+        struct kernel_route route;
         rtm = (struct rt_msghdr*)p;
-        rc = parse_kernel_route(rtm, &routes[i]);
-        if(rc)
-            goto cont;
+        rc = parse_kernel_route(rtm, &route);
+        if(rc < 0)
+            continue;
 
         if(debug > 2)
-            print_kernel_route(1,&routes[i]);
+            print_kernel_route(1, &route);
 
-        i++;
-
-    cont:
-        p += rtm->rtm_msglen;
+        rc = filter->route(&route, filter->route_closure);
+        if(rc < 0)
+            break;
     }
 
     free(buf);
-    return i;
+    return 0;
 
  fail:
     free(buf);
@@ -739,7 +746,7 @@ kernel_routes(struct kernel_route *routes, int maxroutes)
 }
 
 static int
-socket_read(int sock)
+socket_read(int sock, struct kernel_filter *filter)
 {
     int rc;
     struct {
@@ -769,6 +776,7 @@ socket_read(int sock)
         rc = parse_kernel_route(&buf.rtm, &route);
         if(rc < 0)
             return 0;
+        filter->route(&route, filter->route_closure);
         if(debug > 2)
             print_kernel_route(1,&route);
         return 1;
@@ -779,79 +787,93 @@ socket_read(int sock)
 
 }
 
-int
-kernel_addresses(char *ifname, int ifindex, int ll,
-                 struct kernel_route *routes, int maxroutes)
+static int
+kernel_addresses(struct kernel_filter *filter)
 {
     struct ifaddrs *ifa, *ifap;
-    int rc, i;
+    int rc;
 
     rc = getifaddrs(&ifa);
     if(rc < 0)
         return -1;
 
-    ifap = ifa;
-    i = 0;
+    for(ifap = ifa; ifap != NULL; ifap = ifap->ifa_next) {
+        struct kernel_addr addr;
+        addr.ifindex = if_nametoindex(ifap->ifa_name);
+        if(!addr.ifindex)
+            continue;
 
-    while(ifap && i < maxroutes) {
-        if((ifname != NULL && strcmp(ifap->ifa_name, ifname) != 0))
-            goto next;
         if(ifap->ifa_addr->sa_family == AF_INET6) {
             struct sockaddr_in6 *sin6 = (struct sockaddr_in6*)ifap->ifa_addr;
-            if(!!ll != !!IN6_IS_ADDR_LINKLOCAL(&sin6->sin6_addr))
-                goto next;
-            memcpy(routes[i].prefix, &sin6->sin6_addr, 16);
-            if(ll)
+            memcpy(&addr.addr, &sin6->sin6_addr, 16);
+            if(IN6_IS_ADDR_LINKLOCAL(&sin6->sin6_addr))
                 /* This a perfect example of counter-productive optimisation :
                    KAME encodes interface index onto bytes 2 and 3, so we have
                    to reset those bytes to 0 before passing them to babeld. */
-                memset(routes[i].prefix + 2, 0, 2);
-            routes[i].plen = 128;
-            routes[i].metric = 0;
-            routes[i].ifindex = ifindex;
-            routes[i].proto = RTPROT_BABEL_LOCAL;
-            memset(routes[i].gw, 0, 16);
-            i++;
+                memset(((char*)&addr.addr) + 2, 0, 2);
         } else if(ifap->ifa_addr->sa_family == AF_INET) {
             struct sockaddr_in *sin = (struct sockaddr_in*)ifap->ifa_addr;
-            if(ll)
-                goto next;
 #if defined(IN_LINKLOCAL)
             if(IN_LINKLOCAL(htonl(sin->sin_addr.s_addr)))
-                goto next;
+                continue;
 #endif
-            memcpy(routes[i].prefix, v4prefix, 12);
-            memcpy(routes[i].prefix + 12, &sin->sin_addr, 4);
-            routes[i].plen = 128;
-            routes[i].metric = 0;
-            routes[i].ifindex = ifindex;
-            routes[i].proto = RTPROT_BABEL_LOCAL;
-            memset(routes[i].gw, 0, 16);
-            i++;
+            v4tov6((void*)&addr.addr, (void*) &sin->sin_addr);
+        } else {
+            continue;
         }
- next:
-        ifap = ifap->ifa_next;
+        filter->addr(&addr, filter->addr_closure);
     }
 
     freeifaddrs(ifa);
-    return i;
+    return 0;
 }
 
 int
-kernel_callback(int (*fn)(int, void*), void *closure)
+kernel_dump(int operation, struct kernel_filter *filter)
 {
-    int rc;
+    switch(operation) {
+    case CHANGE_ROUTE: return kernel_routes(filter);
+    case CHANGE_ADDR: return kernel_addresses(filter);
+    default: break;
+    }
 
+    return -1;
+}
+
+int
+kernel_callback(struct kernel_filter *filter)
+{
     if(kernel_socket < 0) kernel_setup_socket(1);
 
     kdebugf("Reading kernel table modification.");
-    rc = socket_read(kernel_socket);
-    if(rc)
-        return fn(~0, closure);
+    socket_read(kernel_socket, filter);
 
     return 0;
 
 }
+
+int
+add_rule(int prio, const unsigned char *src_prefix, int src_plen, int table)
+{
+    errno = ENOSYS;
+    return -1;
+}
+
+int
+flush_rule(int prio, int family)
+{
+    errno = ENOSYS;
+    return -1;
+}
+
+int
+change_rule(int new_prio, int old_prio,
+            const unsigned char *src, int plen, int table)
+{
+    errno = ENOSYS;
+    return -1;
+}
+
 
 /* Local Variables:      */
 /* c-basic-offset: 4     */
