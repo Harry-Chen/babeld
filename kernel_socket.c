@@ -214,6 +214,8 @@ kernel_setup(int setup)
     int mib[4];
     size_t datasize;
 
+    if(skip_kernel_setup) return 1;
+
     mib[0] = CTL_NET;
     mib[1] = AF_INET6;
     seq = time(NULL);
@@ -221,10 +223,14 @@ kernel_setup(int setup)
     mib[2] = IPPROTO_IPV6;
     mib[3] = IPV6CTL_FORWARDING;
     datasize = sizeof(old_forwarding);
-    if(setup)
-        rc = sysctl(mib, 4, &old_forwarding, &datasize,
-                    &forwarding, datasize);
-    else if(old_forwarding >= 0)
+    if(setup) {
+        rc = sysctl(mib, 4, &old_forwarding, &datasize, NULL, 0);
+        if(rc == 0 && old_forwarding != forwarding) {
+            rc = sysctl(mib, 4, &old_forwarding, &datasize,
+                        &forwarding, datasize);
+        }
+    }
+    else if(old_forwarding >= 0 && old_forwarding != forwarding)
         rc = sysctl(mib, 4, NULL, NULL,
                     &old_forwarding, datasize);
     if(rc == -1) {
@@ -240,10 +246,13 @@ kernel_setup(int setup)
     mib[3] = ICMPV6CTL_REDIRACCEPT;
 #endif
     datasize = sizeof(old_accept_redirects);
-    if(setup)
-        rc = sysctl(mib, 4, &old_accept_redirects, &datasize,
-                    &accept_redirects, datasize);
-    else if(old_accept_redirects >= 0)
+    if(setup) {
+        rc = sysctl(mib, 4, &old_accept_redirects, &datasize, NULL, 0);
+        if(rc == 0 && old_accept_redirects != accept_redirects) {
+            rc = sysctl(mib, 4, &old_accept_redirects, &datasize,
+                        &accept_redirects, datasize);
+        }
+    } else if(old_accept_redirects >= 0 && old_accept_redirects != accept_redirects)
         rc = sysctl(mib, 4, NULL, NULL,
                     &old_accept_redirects, datasize);
     if(rc == -1) {

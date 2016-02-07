@@ -67,6 +67,7 @@ int default_wired_hello_interval = -1;
 int resend_delay = -1;
 int random_id = 0;
 int do_daemonise = 0;
+int skip_kernel_setup = 0;
 const char *logfile = NULL,
     *pidfile = "/var/run/babeld.pid",
     *state_file = "/var/lib/babel-state";
@@ -128,7 +129,7 @@ main(int argc, char **argv)
 
     while(1) {
         opt = getopt(argc, argv,
-                     "m:p:h:H:i:k:A:srR:uS:d:g:lwz:M:t:T:c:C:DL:I:");
+                     "m:p:h:H:i:k:A:sruS:d:g:lwz:M:t:T:c:C:DL:I:");
         if(opt < 0)
             break;
 
@@ -180,12 +181,6 @@ main(int argc, char **argv)
             break;
         case 'r':
             random_id = 1;
-            break;
-        case 'R':
-            rc = parse_eui64(optarg, myid);
-            if(rc < 0)
-                goto usage;
-            have_id = 1;
             break;
         case 'u':
             keep_unfeasible = 1;
