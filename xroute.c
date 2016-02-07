@@ -164,6 +164,89 @@ xroute_stream_done(struct xroute_stream *stream)
     free(stream);
 }
 
+static int
+filter_route(struct kernel_route *route, void *data) {
+    void **args = (void**)data;
+    int maxroutes = *(int*)args[0];
+    struct kernel_route *routes = (struct kernel_route *)args[1];
+    int *found = (int*)args[2];
+
+    if(*found >= maxroutes)
+        return -1;
+
+    if(martian_prefix(route->prefix, route->plen) ||
+       martian_prefix(route->src_prefix, route->src_plen))
+        return 0;
+
+    routes[*found] = *route;
+    ++ *found;
+
+    return 0;
+}
+
+static int
+kernel_routes(struct kernel_route *routes, int maxroutes)
+{
+    int found = 0;
+    void *data[3] = { &maxroutes, routes, &found };
+    struct kernel_filter filter = {0};
+    filter.route = filter_route;
+    filter.route_closure = data;
+
+    kernel_dump(CHANGE_ROUTE, &filter);
+
+    return found;
+}
+
+static int
+filter_address(struct kernel_addr *addr, void *data) {
+    void **args = (void **)data;
+    int maxroutes = *(int *)args[0];
+    struct kernel_route *routes = (struct kernel_route*)args[1];
+    int *found = (int *)args[2];
+    int ifindex = *(int*)args[3];
+    int ll = args[4] ? !!*(int*)args[4] : 0;
+    struct kernel_route *route = NULL;
+
+    if(*found >= maxroutes)
+        return 0;
+
+    if(ll == !IN6_IS_ADDR_LINKLOCAL(&addr->addr))
+        return 0;
+
+    /* ifindex may be 0 -- see kernel_addresses */
+    if(ifindex && addr->ifindex != ifindex)
+        return 0;
+
+    route = &routes[*found];
+    memcpy(route->prefix, addr->addr.s6_addr, 16);
+    route->plen = 128;
+    route->metric = 0;
+    route->ifindex = addr->ifindex;
+    route->proto = RTPROT_BABEL_LOCAL;
+    memset(route->gw, 0, 16);
+    ++ *found;
+
+    return 1;
+}
+
+/* ifindex is 0 for all interfaces.  ll indicates whether we are
+   interested in link-local or global addresses. */
+int
+kernel_addresses(int ifindex, int ll, struct kernel_route *routes,
+                 int maxroutes)
+{
+    int found = 0;
+    void *data[5] = { &maxroutes, routes, &found, &ifindex, &ll };
+    struct kernel_filter filter = {0};
+    filter.addr = filter_address;
+    filter.addr_closure = data;
+
+    kernel_dump(CHANGE_ADDR, &filter);
+
+    return found;
+}
+
 int
 check_xroutes(int send_updates)
 {
@@ -181,7 +264,7 @@ check_xroutes(int send_updates)
     if(routes == NULL)
         return -1;
 
-    rc = kernel_addresses(NULL, 0, 0, routes, maxroutes);
+    rc = kernel_addresses(0, 0, routes, maxroutes);
     if(rc < 0) {
         perror("kernel_addresses");
         numroutes = 0;

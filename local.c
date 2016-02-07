@@ -31,10 +31,12 @@ THE SOFTWARE.
 #include "interface.h"
 #include "source.h"
 #include "neighbour.h"
+#include "kernel.h"
 #include "xroute.h"
 #include "route.h"
 #include "util.h"
 #include "local.h"
+#include "version.h"
 
 #ifdef NO_LOCAL_INTERFACE
 
@@ -265,10 +267,18 @@ local_notify_all_1(int s)
     int rc;
     struct neighbour *neigh;
     const char *header = "BABEL 0.0\n";
+    char buf[512];
     struct xroute_stream *xroutes;
     struct route_stream *routes;
 
     rc = write_timeout(s, header, strlen(header));
+    if(rc < 0)
+        goto fail;
+
+    rc = snprintf(buf, 512, "version %s\n", BABELD_VERSION);
+    if(rc < 0 || rc >= 512)
+        goto fail;
+    rc = write_timeout(s, buf, rc);
     if(rc < 0)
         goto fail;
 
@@ -288,7 +298,7 @@ local_notify_all_1(int s)
         xroute_stream_done(xroutes);
     }
 
-    routes = route_stream(0);
+    routes = route_stream(ROUTE_ALL);
     if(routes) {
         while(1) {
             struct babel_route *route = route_stream_next(routes);

@@ -52,6 +52,8 @@ THE SOFTWARE.
 #include "resend.h"
 #include "configuration.h"
 #include "local.h"
+#include "rule.h"
+#include "version.h"
 
 struct timeval now;
 
@@ -94,10 +96,52 @@ struct timeval check_neighbours_timeout, check_interfaces_timeout;
 static volatile sig_atomic_t exiting = 0, dumping = 0, reopening = 0;
 
 static int accept_local_connections(fd_set *readfds);
-static int kernel_routes_callback(int changed, void *closure);
 static void init_signals(void);
 static void dump_tables(FILE *out);
 static int reopen_logfile(void);
+
+static int
+kernel_route_notify(struct kernel_route *route, void *closure)
+{
+    kernel_routes_changed = 1;
+    return -1;
+}
+
+static int
+kernel_addr_notify(struct kernel_addr *addr, void *closure)
+{
+    kernel_addr_changed = 1;
+    return -1;
+}
+
+static int
+kernel_link_notify(struct kernel_link *link, void *closure)
+{
+    struct interface *ifp;
+    FOR_ALL_INTERFACES(ifp) {
+        if(strcmp(ifp->name, link->ifname) == 0) {
+            kernel_link_changed = 1;
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int
+kernel_rule_notify(struct kernel_rule *rule, void *closure)
+{
+    int i;
+    if(martian_prefix(rule->src, rule->src_plen))
+        return 0;
+
+    i = rule->priority - src_table_prio;
+
+    if(i < 0 || SRC_TABLE_NUM <= i)
+        return 0;
+
+    kernel_rules_changed = 1;
+    return -1;
+}
 
 int
 main(int argc, char **argv)
@@ -129,7 +173,7 @@ main(int argc, char **argv)
 
     while(1) {
         opt = getopt(argc, argv,
-                     "m:p:h:H:i:k:A:sruS:d:g:lwz:M:t:T:c:C:DL:I:");
+                     "m:p:h:H:i:k:A:sruS:d:g:lwz:M:t:T:c:C:DL:I:V");
         if(opt < 0)
             break;
 
@@ -263,6 +307,10 @@ main(int argc, char **argv)
             break;
         case 'I':
             pidfile = optarg;
+            break;
+        case 'V':
+            fprintf(stderr, "%s\n", BABELD_VERSION);
+            exit(0);
             break;
         default:
             goto usage;
@@ -491,6 +539,9 @@ main(int argc, char **argv)
     rc = check_xroutes(0);
     if(rc < 0)
         fprintf(stderr, "Warning: couldn't check exported routes.\n");
+    rc = check_rules();
+    if(rc < 0)
+        fprintf(stderr, "Warning: couldn't check rules.\n");
 
     kernel_routes_changed = 0;
     kernel_rules_changed = 0;
@@ -588,8 +639,14 @@ main(int argc, char **argv)
         if(exiting)
             break;
 
-        if(kernel_socket >= 0 && FD_ISSET(kernel_socket, &readfds))
-            kernel_callback(kernel_routes_callback, NULL);
+        if(kernel_socket >= 0 && FD_ISSET(kernel_socket, &readfds)) {
+            struct kernel_filter filter = {0};
+            filter.route = kernel_route_notify;
+            filter.addr = kernel_addr_notify;
+            filter.link = kernel_link_notify;
+            filter.rule = kernel_rule_notify;
+            kernel_callback(&filter);
+        }
 
         if(FD_ISSET(protocol_socket, &readfds)) {
             rc = babel_recv(protocol_socket,
@@ -659,6 +716,9 @@ main(int argc, char **argv)
             rc = check_xroutes(1);
             if(rc < 0)
                 fprintf(stderr, "Warning: couldn't check exported routes.\n");
+            rc = check_rules();
+            if(rc < 0)
+                fprintf(stderr, "Warning: couldn't check rules.\n");
             kernel_routes_changed = kernel_rules_changed =
                 kernel_addr_changed = 0;
             if(kernel_socket >= 0)
@@ -756,6 +816,7 @@ main(int argc, char **argv)
         gettime(&now);
         interface_up(ifp, 0);
     }
+    release_tables();
     kernel_setup_socket(0);
     kernel_setup(0);
 
@@ -786,19 +847,20 @@ main(int argc, char **argv)
 
  usage:
     fprintf(stderr,
-            "Syntax: %s "
-            "[-m multicast_address] [-p port] [-S state-file]\n"
-            "                "
+            "%s\n"
+            "Syntax: babeld "
+            "[-V] [-m multicast_address] [-p port] [-S state-file]\n"
+            "               "
             "[-h hello] [-H wired_hello] [-z kind[,factor]]\n"
-            "                "
+            "               "
             "[-k metric] [-A metric] [-s] [-l] [-w] [-r] [-u] [-g port]\n"
-            "                "
+            "               "
             "[-t table] [-T table] [-c file] [-C statement]\n"
-            "                "
+            "               "
             "[-d level] [-D] [-L logfile] [-I pidfile]\n"
-            "                "
+            "               "
             "[id] interface...\n",
-            argv[0]);
+            BABELD_VERSION);
     exit(1);
 
  fail:
@@ -1067,7 +1129,7 @@ dump_tables(FILE *out)
         xroute_stream_done(xroutes);
     }
 
-    routes = route_stream(0);
+    routes = route_stream(ROUTE_ALL);
     if(routes) {
         while(1) {
             struct babel_route *route = route_stream_next(routes);
@@ -1106,19 +1168,5 @@ reopen_logfile()
     if(lfd > 2)
         close(lfd);
 
-    return 1;
-}
-
-static int
-kernel_routes_callback(int changed, void *closure)
-{
-    if(changed & CHANGE_LINK)
-        kernel_link_changed = 1;
-    if(changed & CHANGE_ADDR)
-        kernel_addr_changed = 1;
-    if(changed & CHANGE_ROUTE)
-        kernel_routes_changed = 1;
-    if(changed & CHANGE_RULE)
-        kernel_rules_changed = 1;
     return 1;
 }

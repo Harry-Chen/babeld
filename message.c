@@ -35,11 +35,11 @@ THE SOFTWARE.
 #include "source.h"
 #include "neighbour.h"
 #include "route.h"
+#include "kernel.h"
 #include "xroute.h"
 #include "resend.h"
 #include "message.h"
 #include "configuration.h"
-#include "kernel.h"
 
 unsigned char packet_header[4] = {42, 2};
 
@@ -1214,7 +1214,7 @@ really_send_update(struct interface *ifp,
             accumulate_bytes(ifp, id, 8);
             end_message(ifp, MESSAGE_ROUTER_ID, 10);
         }
-        memcpy(ifp->buffered_id, id, 16);
+        memcpy(ifp->buffered_id, id, 8);
         ifp->have_buffered_id = 1;
     }
 
@@ -1525,7 +1525,7 @@ send_update(struct interface *ifp, int urgent,
         struct route_stream *routes;
         send_self_update(ifp);
         debugf("Sending update to %s for any.\n", ifp->name);
-        routes = route_stream(1);
+        routes = route_stream(ROUTE_INSTALLED);
         if(routes) {
             while(1) {
                 struct babel_route *route = route_stream_next(routes);
@@ -1639,8 +1639,7 @@ send_ihu(struct neighbour *neigh, struct interface *ifp)
         struct interface *ifp_aux;
         FOR_ALL_INTERFACES(ifp_aux) {
             if(if_up(ifp_aux))
-                continue;
-            send_ihu(NULL, ifp_aux);
+                send_ihu(NULL, ifp_aux);
         }
         return;
     }
@@ -1677,9 +1676,9 @@ send_ihu(struct neighbour *neigh, struct interface *ifp)
 
     ll = linklocal(neigh->address);
 
-    if((ifp->flags & IF_TIMESTAMPS) && neigh->hello_send_us
+    if((ifp->flags & IF_TIMESTAMPS) && neigh->hello_send_us &&
        /* Checks whether the RTT data is not too old to be sent. */
-       && timeval_minus_msec(&now, &neigh->hello_rtt_receive_time) < 1000000) {
+       timeval_minus_msec(&now, &neigh->hello_rtt_receive_time) < 1000000) {
         send_rtt_data = 1;
     } else {
         neigh->hello_send_us = 0;
@@ -1772,7 +1771,7 @@ send_request(struct interface *ifp,
         debugf("sending request to %s for %s from %s.\n", ifp->name,
                format_prefix(prefix, plen),
                format_prefix(src_prefix, src_plen));
-    } else if (prefix) {
+    } else if(prefix) {
         debugf("sending request to %s for any specific.\n", ifp->name);
         start_message(ifp, MESSAGE_REQUEST_SRC_SPECIFIC, 3);
         accumulate_byte(ifp, 0);
@@ -1780,7 +1779,7 @@ send_request(struct interface *ifp,
         accumulate_byte(ifp, 0);
         end_message(ifp, MESSAGE_REQUEST_SRC_SPECIFIC, 3);
         return;
-    } else if (src_prefix) {
+    } else if(src_prefix) {
         debugf("sending request to %s for any.\n", ifp->name);
         start_message(ifp, MESSAGE_REQUEST, 2);
         accumulate_byte(ifp, 0);
@@ -1797,7 +1796,7 @@ send_request(struct interface *ifp,
     pb = v4 ? ((plen - 96) + 7) / 8 : (plen + 7) / 8;
     len = 2 + pb;
 
-    if (src_plen != 0) {
+    if(src_plen != 0) {
         spb = v4 ? ((src_plen - 96) + 7) / 8 : (src_plen + 7) / 8;
         len += spb + 1;
         start_message(ifp, MESSAGE_REQUEST_SRC_SPECIFIC, len);
@@ -1838,7 +1837,7 @@ send_unicast_request(struct neighbour *neigh,
                format_address(neigh->address),
                format_prefix(prefix, plen),
                format_prefix(src_prefix, src_plen));
-    } else if (prefix) {
+    } else if(prefix) {
         debugf("sending unicast request to %s for any specific.\n",
                format_address(neigh->address));
         rc = start_unicast_message(neigh, MESSAGE_REQUEST_SRC_SPECIFIC, 3);
@@ -1848,7 +1847,7 @@ send_unicast_request(struct neighbour *neigh,
         accumulate_unicast_byte(neigh, 0);
         end_unicast_message(neigh, MESSAGE_REQUEST_SRC_SPECIFIC, 3);
         return;
-    } else if (src_prefix) {
+    } else if(src_prefix) {
         debugf("sending unicast request to %s for any.\n",
                format_address(neigh->address));
         rc = start_unicast_message(neigh, MESSAGE_REQUEST, 2);
