@@ -32,8 +32,10 @@ SCRIPTNAME=/etc/init.d/$NAME
 
 # Exit if there is no interfaces
 if [ -z "$INTERFACES" ]; then
-  echo "$DESC: no interfaces to operate on"
-  exit 0
+  if [ ! -f /etc/babeld.conf ] || [ $(grep -v '^#' /etc/babeld.conf| wc -l) -eq 0 ]; then
+    echo "$DESC: no interfaces to operate on"
+    exit 0
+  fi
 fi
 
 # Load the VERBOSE setting and other rcS variables
