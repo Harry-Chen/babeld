@@ -57,6 +57,8 @@ struct timeval unicast_flush_timeout = {0, 0};
 static const unsigned char v4prefix[16] =
     {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 0, 0, 0, 0 };
 
+#define MAX_CHANNEL_HOPS 20
+
 /* Parse a network prefix, encoded in the somewhat baroque compressed
    representation used by Babel.  Return the number of bytes parsed. */
 static int
@@ -115,15 +117,31 @@ network_prefix(int ae, int plen, unsigned int omitted,
         return -1;
     }
 
-    mask_prefix(p_r, prefix, plen < 0 ? 128 : ae == 1 ? plen + 96 : plen);
+    normalize_prefix(p_r, prefix, plen < 0 ? 128 : ae == 1 ? plen + 96 : plen);
     return ret;
 }
 
 static void
-parse_update_subtlv(const unsigned char *a, int alen,
-                    unsigned char *channels)
+parse_update_subtlv(struct interface *ifp, int metric,
+                    const unsigned char *a, int alen,
+                    unsigned char *channels, int *channels_len_return)
 {
     int type, len, i = 0;
+    int channels_len;
+
+    /* This will be overwritten if there's a DIVERSITY_HOPS sub-TLV. */
+    if(*channels_len_return < 1 || (ifp->flags & IF_FARAWAY)) {
+        channels_len = 0;
+    } else {
+        if(metric < 256) {
+            /* Assume non-interfering (wired) link. */
+            channels_len = 0;
+        } else {
+            /* Assume interfering. */
+            channels[0] = IF_CHANNEL_INTERFERING;
+            channels_len = 1;
+        }
+    }
 
     while(i < alen) {
         type = a[i];
@@ -145,25 +163,15 @@ parse_update_subtlv(const unsigned char *a, int alen,
         if(type == SUBTLV_PADN) {
             /* Nothing. */
         } else if(type == SUBTLV_DIVERSITY) {
-            if(len > DIVERSITY_HOPS) {
-                fprintf(stderr,
-                        "Received overlong channel information (%d > %d).\n",
-                        len, DIVERSITY_HOPS);
-                len = DIVERSITY_HOPS;
-            }
-            if(memchr(a + i + 2, 0, len) != NULL) {
-                /* 0 is reserved. */
-                fprintf(stderr, "Channel information contains 0!");
-                return;
-            }
-            memset(channels, 0, DIVERSITY_HOPS);
-            memcpy(channels, a + i + 2, len);
+            memcpy(channels, a + i + 2, MIN(len, *channels_len_return));
+            channels_len = MIN(len, *channels_len_return);
         } else {
             debugf("Received unknown update sub-TLV %d.\n", type);
         }
 
         i += len + 2;
     }
+    *channels_len_return = channels_len;
 }
 
 static int
@@ -258,13 +266,6 @@ network_address(int ae, const unsigned char *a, unsigned int len,
                 unsigned char *a_r)
 {
     return network_prefix(ae, -1, 0, a, NULL, len, a_r);
-}
-
-static int
-channels_len(unsigned char *channels)
-{
-    unsigned char *p = memchr(channels, 0, DIVERSITY_HOPS);
-    return p ? (p - channels) : DIVERSITY_HOPS;
 }
 
 void
@@ -444,7 +445,8 @@ parse_packet(const unsigned char *from, struct interface *ifp,
         } else if(type == MESSAGE_UPDATE) {
             unsigned char prefix[16], *nh;
             unsigned char plen;
-            unsigned char channels[DIVERSITY_HOPS];
+            unsigned char channels[MAX_CHANNEL_HOPS];
+            int channels_len = MAX_CHANNEL_HOPS;
             unsigned short interval, seqno, metric;
             int rc, parsed_len;
             if(len < 10) {
@@ -523,27 +525,11 @@ parse_packet(const unsigned char *from, struct interface *ifp,
                     goto done;
             }
 
-            if((ifp->flags & IF_FARAWAY)) {
-                channels[0] = 0;
-            } else {
-                /* This will be overwritten by parse_update_subtlv below. */
-                if(metric < 256) {
-                    /* Assume non-interfering (wired) link. */
-                    channels[0] = 0;
-                } else {
-                    /* Assume interfering. */
-                    channels[0] = IF_CHANNEL_INTERFERING;
-                    channels[1] = 0;
-                }
-
-                if(parsed_len < len)
-                    parse_update_subtlv(message + 2 + parsed_len,
-                                        len - parsed_len, channels);
-            }
-
+            parse_update_subtlv(ifp, metric, message + 2 + parsed_len,
+                                len - parsed_len, channels, &channels_len);
             update_route(router_id, prefix, plen, zeroes, 0, seqno,
                          metric, interval, neigh, nh,
-                         channels, channels_len(channels));
+                         channels, channels_len);
         } else if(type == MESSAGE_REQUEST) {
             unsigned char prefix[16], plen;
             int rc;
@@ -589,7 +575,8 @@ parse_packet(const unsigned char *from, struct interface *ifp,
         } else if(type == MESSAGE_UPDATE_SRC_SPECIFIC) {
             unsigned char prefix[16], src_prefix[16], *nh;
             unsigned char ae, plen, src_plen, omitted;
-            unsigned char channels[DIVERSITY_HOPS];
+            unsigned char channels[MAX_CHANNEL_HOPS];
+            int channels_len = MAX_CHANNEL_HOPS;
             unsigned short interval, seqno, metric;
             const unsigned char *src_prefix_beginning = NULL;
             int rc, parsed_len = 0;
@@ -652,27 +639,11 @@ parse_packet(const unsigned char *from, struct interface *ifp,
                     goto done;
             }
 
-            if((ifp->flags & IF_FARAWAY)) {
-                channels[0] = 0;
-            } else {
-                /* This will be overwritten by parse_update_subtlv below. */
-                if(metric < 256) {
-                    /* Assume non-interfering (wired) link. */
-                    channels[0] = 0;
-                } else {
-                    /* Assume interfering. */
-                    channels[0] = IF_CHANNEL_INTERFERING;
-                    channels[1] = 0;
-                }
-
-                if(parsed_len < len)
-                    parse_update_subtlv(message + 2 + parsed_len,
-                                        len - parsed_len, channels);
-            }
-
+            parse_update_subtlv(ifp, metric, message + 2 + parsed_len,
+                                len - parsed_len, channels, &channels_len);
             update_route(router_id, prefix, plen, src_prefix, src_plen,
                          seqno, metric, interval, neigh, nh,
-                         channels, channels_len(channels));
+                         channels, channels_len);
         } else if(type == MESSAGE_REQUEST_SRC_SPECIFIC) {
             unsigned char prefix[16], plen, ae, src_prefix[16], src_plen;
             int rc, parsed = 5;
@@ -1375,7 +1346,7 @@ flushupdates(struct interface *ifp)
                 last_src_prefix = xroute->src_prefix;
                 last_src_plen = xroute->src_plen;
             } else if(route) {
-                unsigned char channels[DIVERSITY_HOPS];
+                unsigned char channels[MAX_CHANNEL_HOPS];
                 int chlen;
                 struct interface *route_ifp = route->neigh->ifp;
                 unsigned short metric;
@@ -1398,7 +1369,9 @@ flushupdates(struct interface *ifp)
                     continue;
 
                 if(route_ifp->channel == IF_CHANNEL_NONINTERFERING) {
-                    memcpy(channels, route->channels, DIVERSITY_HOPS);
+                    memcpy(channels, route->channels,
+                           MIN(route->channels_len, MAX_CHANNEL_HOPS));
+                    chlen = MIN(route->channels_len, MAX_CHANNEL_HOPS);
                 } else {
                     if(route_ifp->channel == IF_CHANNEL_UNKNOWN)
                         channels[0] = IF_CHANNEL_INTERFERING;
@@ -1407,10 +1380,11 @@ flushupdates(struct interface *ifp)
                                route_ifp->channel <= 255);
                         channels[0] = route_ifp->channel;
                     }
-                    memcpy(channels + 1, route->channels, DIVERSITY_HOPS - 1);
+                    memcpy(channels + 1, route->channels,
+                           MIN(route->channels_len, MAX_CHANNEL_HOPS - 1));
+                    chlen = 1 + MIN(route->channels_len, MAX_CHANNEL_HOPS - 1);
                 }
 
-                chlen = channels_len(channels);
                 really_send_update(ifp, route->src->id,
                                    route->src->prefix, route->src->plen,
                                    route->src->src_prefix, route->src->src_plen,
@@ -1801,6 +1775,7 @@ send_request(struct interface *ifp,
         len += spb + 1;
         start_message(ifp, MESSAGE_REQUEST_SRC_SPECIFIC, len);
     } else {
+        spb = 0;
         start_message(ifp, MESSAGE_REQUEST, len);
     }
     accumulate_byte(ifp, v4 ? 1 : 2);
@@ -1817,9 +1792,9 @@ send_request(struct interface *ifp,
         else
             accumulate_bytes(ifp, src_prefix, spb);
         end_message(ifp, MESSAGE_REQUEST_SRC_SPECIFIC, len);
-        return;
+    } else {
+        end_message(ifp, MESSAGE_REQUEST, len);
     }
-    end_message(ifp, MESSAGE_REQUEST, len);
 }
 
 void
@@ -1871,6 +1846,7 @@ send_unicast_request(struct neighbour *neigh,
         len += spb + 1;
         rc = start_unicast_message(neigh, MESSAGE_REQUEST_SRC_SPECIFIC, len);
     } else {
+        spb = 0;
         rc = start_unicast_message(neigh, MESSAGE_REQUEST, len);
     }
     if(rc < 0) return;
@@ -1888,9 +1864,9 @@ send_unicast_request(struct neighbour *neigh,
         else
             accumulate_unicast_bytes(neigh, src_prefix, spb);
         end_unicast_message(neigh, MESSAGE_REQUEST_SRC_SPECIFIC, len);
-        return;
+    } else {
+        end_unicast_message(neigh, MESSAGE_REQUEST, len);
     }
-    end_unicast_message(neigh, MESSAGE_REQUEST, len);
 }
 
 void
@@ -1931,6 +1907,7 @@ send_multihop_request(struct interface *ifp,
         len += spb;
         start_message(ifp, MESSAGE_MH_REQUEST_SRC_SPECIFIC, len);
     } else {
+        spb = 0;
         start_message(ifp, MESSAGE_MH_REQUEST, len);
     }
     accumulate_byte(ifp, v4 ? 1 : 2);
@@ -1951,9 +1928,9 @@ send_multihop_request(struct interface *ifp,
         else
             accumulate_bytes(ifp, src_prefix, spb);
         end_message(ifp, MESSAGE_MH_REQUEST_SRC_SPECIFIC, len);
-        return;
+    } else {
+        end_message(ifp, MESSAGE_MH_REQUEST, len);
     }
-    end_message(ifp, MESSAGE_MH_REQUEST, len);
 }
 
 void
@@ -1982,6 +1959,7 @@ send_unicast_multihop_request(struct neighbour *neigh,
         len += spb;
         rc = start_unicast_message(neigh, MESSAGE_MH_REQUEST_SRC_SPECIFIC, len);
     } else {
+        spb = 0;
         rc = start_unicast_message(neigh, MESSAGE_MH_REQUEST, len);
     }
     if(rc < 0) return;
@@ -2003,9 +1981,9 @@ send_unicast_multihop_request(struct neighbour *neigh,
         else
             accumulate_unicast_bytes(neigh, src_prefix, spb);
         end_unicast_message(neigh, MESSAGE_MH_REQUEST_SRC_SPECIFIC, len);
-        return;
+    } else {
+        end_unicast_message(neigh, MESSAGE_MH_REQUEST, len);
     }
-    end_unicast_message(neigh, MESSAGE_MH_REQUEST, len);
 }
 
 void

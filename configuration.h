@@ -20,6 +20,15 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
+/* Values returned by parse_config_from_string. */
+
+#define CONFIG_ACTION_DONE 0
+#define CONFIG_ACTION_QUIT 1
+#define CONFIG_ACTION_DUMP 2
+#define CONFIG_ACTION_MONITOR 3
+#define CONFIG_ACTION_UNMONITOR 4
+#define CONFIG_ACTION_NO 5
+
 struct filter_result {
     unsigned int add_metric; /* allow = 0, deny = INF, metric = <0..INF> */
     unsigned char *src_prefix;
@@ -46,8 +55,10 @@ struct filter {
 
 extern struct interface_conf *default_interface_conf;
 
+void flush_ifconf(struct interface_conf *if_conf);
+
 int parse_config_from_file(const char *filename, int *line_return);
-int parse_config_from_string(char *string);
+int parse_config_from_string(char *string, int n, const char **message_return);
 void renumber_filters(void);
 
 int input_filter(const unsigned char *id,

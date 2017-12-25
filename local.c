@@ -26,6 +26,7 @@ THE SOFTWARE.
 #include <unistd.h>
 #include <errno.h>
 #include <sys/time.h>
+#include <arpa/inet.h>
 
 #include "babeld.h"
 #include "interface.h"
@@ -35,33 +36,16 @@ THE SOFTWARE.
 #include "xroute.h"
 #include "route.h"
 #include "util.h"
+#include "configuration.h"
 #include "local.h"
 #include "version.h"
 
-#ifdef NO_LOCAL_INTERFACE
-
-int dummy;
-
-#else
-
-int local_server_socket = -1, local_sockets[MAX_LOCAL_SOCKETS];
+int local_server_socket = -1;
+struct local_socket local_sockets[MAX_LOCAL_SOCKETS];
 int num_local_sockets = 0;
 int local_server_port = -1;
-
-int
-local_read(int s)
-{
-    int rc;
-    char buf[500];
-
-    /* Ignore anything that comes in, except for EOF */
-    rc = read(s, buf, 500);
-
-    if(rc <= 0)
-        return rc;
-
-    return 1;
-}
+char *local_server_path;
+int local_server_write = 0;
 
 static int
 write_timeout(int fd, const void *buf, int len)
@@ -94,34 +78,6 @@ write_timeout(int fd, const void *buf, int len)
     }
 }
 
-static void
-local_notify_self_1(int s)
-{
-    char buf[512];
-    char host[64];
-    int rc;
-
-    rc = gethostname(host, 64);
-
-    if(rc < 0)
-        strncpy(host, "alamakota", 64);
-
-    rc = snprintf(buf, 512, "add self %.64s id %s\n",
-                  host, format_eui64(myid));
-
-    if(rc < 0 || rc >= 512)
-        goto fail;
-
-    rc = write_timeout(s, buf, rc);
-    if(rc < 0)
-        goto fail;
-    return;
-
- fail:
-    shutdown(s, 1);
-    return;
-}
-
 static const char *
 local_kind(int kind)
 {
@@ -134,7 +90,55 @@ local_kind(int kind)
 }
 
 static void
-local_notify_neighbour_1(int s, struct neighbour *neigh, int kind)
+local_notify_interface_1(struct local_socket *s,
+                         struct interface *ifp, int kind)
+{
+    char buf[512], v4[INET_ADDRSTRLEN];
+    int rc;
+    int up;
+
+    up = if_up(ifp);
+    if(up && ifp->ipv4)
+        inet_ntop(AF_INET, ifp->ipv4, v4, INET_ADDRSTRLEN);
+    else
+        v4[0] = '\0';
+    if(up)
+        rc = snprintf(buf, 512,
+                      "%s interface %s up true%s%s%s%s\n",
+                      local_kind(kind), ifp->name,
+                      ifp->ll ? " ipv6 " : "",
+                      ifp->ll ? format_address(*ifp->ll) : "",
+                      v4[0] ? " ipv4 " : "", v4);
+    else
+        rc = snprintf(buf, 512, "%s interface %s up false\n",
+                      local_kind(kind), ifp->name);
+
+    if(rc < 0 || rc >= 512)
+        goto fail;
+
+    rc = write_timeout(s->fd, buf, rc);
+    if(rc < 0)
+        goto fail;
+    return;
+
+ fail:
+    shutdown(s->fd, 1);
+    return;
+}
+
+void
+local_notify_interface(struct interface *ifp, int kind)
+{
+    int i;
+    for(i = 0; i < num_local_sockets; i++) {
+        if(local_sockets[i].monitor)
+            local_notify_interface_1(&local_sockets[i], ifp, kind);
+    }
+}
+
+static void
+local_notify_neighbour_1(struct local_socket *s,
+                         struct neighbour *neigh, int kind)
 {
     char buf[512], rttbuf[64];
     int rc;
@@ -165,13 +169,13 @@ local_notify_neighbour_1(int s, struct neighbour *neigh, int kind)
     if(rc < 0 || rc >= 512)
         goto fail;
 
-    rc = write_timeout(s, buf, rc);
+    rc = write_timeout(s->fd, buf, rc);
     if(rc < 0)
         goto fail;
     return;
 
  fail:
-    shutdown(s, 1);
+    shutdown(s->fd, 1);
     return;
 }
 
@@ -179,12 +183,14 @@ void
 local_notify_neighbour(struct neighbour *neigh, int kind)
 {
     int i;
-    for(i = 0; i < num_local_sockets; i++)
-        local_notify_neighbour_1(local_sockets[i], neigh, kind);
+    for(i = 0; i < num_local_sockets; i++) {
+        if(local_sockets[i].monitor)
+            local_notify_neighbour_1(&local_sockets[i], neigh, kind);
+    }
 }
 
 static void
-local_notify_xroute_1(int s, struct xroute *xroute, int kind)
+local_notify_xroute_1(struct local_socket *s, struct xroute *xroute, int kind)
 {
     char buf[512];
     int rc;
@@ -200,13 +206,13 @@ local_notify_xroute_1(int s, struct xroute *xroute, int kind)
     if(rc < 0 || rc >= 512)
         goto fail;
 
-    rc = write_timeout(s, buf, rc);
+    rc = write_timeout(s->fd, buf, rc);
     if(rc < 0)
         goto fail;
     return;
 
  fail:
-    shutdown(s, 1);
+    shutdown(s->fd, 1);
     return;
 }
 
@@ -214,12 +220,14 @@ void
 local_notify_xroute(struct xroute *xroute, int kind)
 {
     int i;
-    for(i = 0; i < num_local_sockets; i++)
-        local_notify_xroute_1(local_sockets[i], xroute, kind);
+    for(i = 0; i < num_local_sockets; i++) {
+        if(local_sockets[i].monitor)
+            local_notify_xroute_1(&local_sockets[i], xroute, kind);
+    }
 }
 
 static void
-local_notify_route_1(int s, struct babel_route *route, int kind)
+local_notify_route_1(struct local_socket *s, struct babel_route *route, int kind)
 {
     char buf[512];
     int rc;
@@ -229,10 +237,10 @@ local_notify_route_1(int s, struct babel_route *route, int kind)
                                            route->src->src_plen);
 
     rc = snprintf(buf, 512,
-                  "%s route %s-%lx-%s prefix %s from %s installed %s "
+                  "%s route %lx prefix %s from %s installed %s "
                   "id %s metric %d refmetric %d via %s if %s\n",
                   local_kind(kind),
-                  dst_prefix, (unsigned long)route->neigh, src_prefix,
+                  (unsigned long)route,
                   dst_prefix, src_prefix,
                   route->installed ? "yes" : "no",
                   format_eui64(route->src->id),
@@ -243,13 +251,13 @@ local_notify_route_1(int s, struct babel_route *route, int kind)
     if(rc < 0 || rc >= 512)
         goto fail;
 
-    rc = write_timeout(s, buf, rc);
+    rc = write_timeout(s->fd, buf, rc);
     if(rc < 0)
         goto fail;
     return;
 
  fail:
-    shutdown(s, 1);
+    shutdown(s->fd, 1);
     return;
 }
 
@@ -257,32 +265,24 @@ void
 local_notify_route(struct babel_route *route, int kind)
 {
     int i;
-    for(i = 0; i < num_local_sockets; i++)
-        local_notify_route_1(local_sockets[i], route, kind);
+    for(i = 0; i < num_local_sockets; i++) {
+        if(local_sockets[i].monitor)
+            local_notify_route_1(&local_sockets[i], route, kind);
+    }
 }
 
-void
-local_notify_all_1(int s)
+static void
+local_notify_all_1(struct local_socket *s)
 {
-    int rc;
+    struct interface *ifp;
     struct neighbour *neigh;
-    const char *header = "BABEL 0.0\n";
-    char buf[512];
     struct xroute_stream *xroutes;
     struct route_stream *routes;
 
-    rc = write_timeout(s, header, strlen(header));
-    if(rc < 0)
-        goto fail;
+    FOR_ALL_INTERFACES(ifp) {
+        local_notify_interface_1(s, ifp, LOCAL_ADD);
+    }
 
-    rc = snprintf(buf, 512, "version %s\n", BABELD_VERSION);
-    if(rc < 0 || rc >= 512)
-        goto fail;
-    rc = write_timeout(s, buf, rc);
-    if(rc < 0)
-        goto fail;
-
-    local_notify_self_1(s);
     FOR_ALL_NEIGHBOURS(neigh) {
         local_notify_neighbour_1(s, neigh, LOCAL_ADD);
     }
@@ -308,15 +308,133 @@ local_notify_all_1(int s)
         }
         route_stream_done(routes);
     }
-
-    rc = write_timeout(s, "done\n", 5);
-    if(rc < 0)
-        goto fail;
-    return;
-
- fail:
-    shutdown(s, 1);
     return;
 }
 
-#endif
+int
+local_read(struct local_socket *s)
+{
+    int rc;
+    char *eol;
+    char reply[100] = "ok\n";
+    const char *message = NULL;
+
+    if(s->buf == NULL)
+        s->buf = malloc(LOCAL_BUFSIZE);
+    if(s->buf == NULL)
+        return -1;
+
+    if(s->n >= LOCAL_BUFSIZE) {
+        errno = ENOSPC;
+        goto fail;
+    }
+
+    rc = read(s->fd, s->buf + s->n, LOCAL_BUFSIZE - s->n);
+    if(rc <= 0)
+        return rc;
+    s->n += rc;
+
+    eol = memchr(s->buf, '\n', s->n);
+    if(eol == NULL)
+        return 1;
+
+    rc = parse_config_from_string(s->buf, eol + 1 - s->buf, &message);
+    switch(rc) {
+    case CONFIG_ACTION_DONE:
+        break;
+    case CONFIG_ACTION_QUIT:
+        shutdown(s->fd, 1);
+        reply[0] = '\0';
+        break;
+    case CONFIG_ACTION_DUMP:
+        local_notify_all_1(s);
+        break;
+    case CONFIG_ACTION_MONITOR:
+        local_notify_all_1(s);
+        s->monitor = 1;
+        break;
+    case CONFIG_ACTION_UNMONITOR:
+        s->monitor = 0;
+        break;
+    case CONFIG_ACTION_NO:
+        snprintf(reply, sizeof(reply), "no%s%s\n",
+                 message ? " " : "", message ? message : "");
+        break;
+    default:
+        snprintf(reply, sizeof(reply), "bad\n");
+    }
+
+    if(reply[0] != '\0') {
+        rc = write_timeout(s->fd, reply, strlen(reply));
+        if(rc < 0)
+            goto fail;
+    }
+
+    if(s->n > eol + 1 - s->buf) {
+        memmove(s->buf, eol + 1, s->n - (eol + 1 - s->buf));
+        s->n -= (eol + 1 - s->buf);
+    } else {
+        s->n = 0;
+        free(s->buf);
+        s->buf = NULL;
+    }
+
+    return 1;
+
+ fail:
+    shutdown(s->fd, 1);
+    return -1;
+}
+
+int
+local_header(struct local_socket *s)
+{
+    char buf[512], host[64];
+    int rc;
+
+    rc = gethostname(host, 64);
+    if(rc < 0)
+        strncpy(host, "alamakota", 64);
+
+    rc = snprintf(buf, 512, "BABEL 1.0\nversion %s\nhost %s\nmy-id %s\nok\n",
+                  BABELD_VERSION, host, format_eui64(myid));
+    if(rc < 0 || rc >= 512)
+        goto fail;
+    rc = write_timeout(s->fd, buf, rc);
+    if(rc < 0)
+        goto fail;
+
+    return 1;
+
+ fail:
+    shutdown(s->fd, 1);
+    return -1;
+}
+
+struct local_socket *
+local_socket_create(int fd)
+{
+    if(num_local_sockets >= MAX_LOCAL_SOCKETS)
+        return NULL;
+
+    memset(&local_sockets[num_local_sockets], 0, sizeof(struct local_socket));
+    local_sockets[num_local_sockets].fd = fd;
+    num_local_sockets++;
+
+    return &local_sockets[num_local_sockets - 1];
+}
+
+void
+local_socket_destroy(int i)
+{
+    if(i < 0 || i >= num_local_sockets) {
+        fprintf(stderr, "Internal error: closing unknown local socket.\n");
+        return;
+    }
+
+    free(local_sockets[i].buf);
+    close(local_sockets[i].fd);
+    local_sockets[i] = local_sockets[--num_local_sockets];
+    VALGRIND_MAKE_MEM_UNDEFINED(local_sockets + num_local_sockets,
+                                sizeof(struct local_socket));
+}
