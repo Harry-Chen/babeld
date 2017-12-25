@@ -109,9 +109,23 @@ requests tracing every message sent or received.  A value of
 3 additionally dumps all interactions with the OS kernel.  The default
 is 0.
 .TP
-.BI \-g " port"
-Listen for connections from a front-end on port
-.IR port .
+.BI \-g " port\fR,\fP" " \-g" " path"
+Set up a local configuration server on port
+.I port
+or at
+.I path
+in read-only mode.  The protocol is described in the section
+.B Local Configuration Protocol
+below.
+.TP
+.BI \-G " port\fR,\fP" " \-G" " path"
+Set up a local configuration server on port
+.I port
+or at
+.I path
+in read-write mode.  This allows any local user to change
+.BR babeld 's
+configuration, and may therefore be a security issue.
 .TP
 .BI \-t " table"
 Use the given kernel routing table for routes inserted by
@@ -140,7 +154,8 @@ defaults to standard error if not daemonising, and to
 otherwise.
 .TP
 .BI \-I " pidfile"
-Specify a file to write our process id to.  The default is
+Specify a file to write our process id to, use no pidfile if set to the
+empty string.  The default is
 .BR /var/run/babeld.pid .
 .TP
 .IR interface ...
@@ -204,9 +219,36 @@ option
 .BI local-port " port"
 This specifies the TCP port on which
 .B babeld
-will listen for connections from a front-end, and is equivalent to the
-command-line option
+will listen for connections from a configuration client in read-only mode,
+and is equivalent to the command-line option
 .BR \-g .
+.TP
+.BI local-port-readwrite " port"
+This specifies the TCP port on which
+.B babeld
+will listen for connections from a configuration client in read-write mode,
+and is equivalent to the command-line option
+.BR \-G .
+This allows any local user to change
+.BR babeld 's
+configuration, and may therefore be a security issue.
+.TP
+.BI local-path " path"
+This specifies the filesystem path to a socket on which
+.B babeld
+will listen for connections from a configuration client in read-only mode,
+and is equivalent to the command-line option
+.BR \-g .
+.TP
+.BI local-path-readwrite " path"
+This specifies the filesystem path to a socket on which
+.B babeld
+will listen for connections from a configuration client in read-write mode,
+and is equivalent to the command-line option
+.BR \-G .
+Any user with write access to that socket will be able to change
+.BR babeld 's
+configuration.
 .TP
 .BI export-table " table"
 This specifies the kernel routing table to use for routes inserted by
@@ -246,7 +288,7 @@ for smoothing metrics for performing route selection, and is
 equivalent to the command-line option
 .BR \-M .
 .TP
-.BR deamonise " {" true | false }
+.BR daemonise " {" true | false }
 This specifies whether to daemonize at startup, and is equivalent to
 the command-line option
 .BR \-D .
@@ -308,30 +350,32 @@ Each
 .I parameter
 can be one of:
 .TP
-.BR wired " {" true | false | auto }
-This specifies whether to enable optimisations specific to wired interfaces.
-By default, this is determined automatically unless the
+.BR type " {" auto | wired | wireless | tunnel }
+
+The default is
+.B auto
+unless the
 .B \-w
 command-line flag was specified.
 .TP
 .BR link\-quality " {" true | false | auto }
 This specifies whether link quality estimation should be performed on this
 interface.  The default is to perform link quality estimation on wireless
-interfaces but not on wired interfaces.
+interfaces only.
 .TP
 .BR split\-horizon " {" true | false | auto }
 This specifies whether to perform split-horizon processing on this
-interface.  The default is to never perform split-horizon processing on
-wireless interfaces; on wired interfaces, the default depends on the
+interface.  The default is to perform split-horizon processing on
+on wired interfaces, unless the
 .B \-s
-flag.
+flag was set.
 .TP
 .BI rxcost " cost"
 This defines the cost of receiving frames on the given interface under
-ideal conditions (no packet loss); how this relates to the actual cost used
-for computing metrics of routes going through this interface depends on
-whether link quality estimation is being done.  The default is 96 for wired
-interfaces, and 256 for wireless ones.
+ideal conditions (no packet loss); how this relates to the actual cost
+used for computing metrics of routes going through this interface depends
+on whether link quality estimation is being done.  The default is 256 if
+the interface is wireless, and 96 otherwise.
 .TP
 .BI channel " channel"
 Sets the channel for this interface.  The value
@@ -343,7 +387,7 @@ or
 The default is to autodetect the channel number for wireless interfaces,
 and
 .B noninterfering
-for wired interfaces.
+for other interfaces.
 .TP
 .BR faraway " {" true | false }
 This specifies whether the network is "far away", in the sense that
@@ -368,9 +412,7 @@ packet loss is expected.  The default is four times the hello interval.
 Enable sending timestamps with each Hello and IHU message in order to
 compute RTT values.  The default is
 .B true
-if
-.B max\-rtt\-penalty
-is non-zero (see below), and
+for tunnel interfaces, and
 .B false
 otherwise.
 .TP
@@ -400,8 +442,12 @@ This specifies the maximum cost added to a neighbour because of RTT,
 i.e. when the RTT is higher or equal than
 .BR rtt\-max .
 The default is
-.BR 0 ,
-which effectively disables the use of a RTT-based cost.
+.BR 96
+if the interface is of type
+.B tunnel,
+and
+.BR 0 
+otherwise.
 .SS Filtering rules
 A filtering rule is defined by a single line with the following format:
 .IP
@@ -411,11 +457,14 @@ A filtering rule is defined by a single line with the following format:
 .PP
 .I Filter
 specifies the filter to which this entry will be added, and can be one of
-.BR in ,
-.BR out ,
-.BR redistribute ,
-or
-.BR install .
+.B in
+(applied to routes learned from Babel neighbours),
+.B out
+(applied to routes announced to Babel neighbours),
+.B redistribute
+(applied to routes redistributed from the kernel), or
+.B install
+(applied to routes installed into the kernel).
 
 Each
 .I selector
@@ -525,6 +574,48 @@ should include the line
 redistribute local deny
 .PP
 as the last line in your configuration file.
+.SH LOCAL CONFIGURATION INTERFACE
+If
+.B babeld
+is invoked with the flag
+.BR \-g ,
+it accepts TCP connections from local clients on the given port and address
+.B ::1
+(the IPv6
+.B localhost
+address), or on the given UNIX-domain socket path if the argument starts with
+\[oq]/\[cq].  When a client connects,
+.B babeld
+replies with
+.B BABEL
+followed with the supported version of the local configuration protocol (currently
+.BR 1.0 ).
+This is followed with a number of informational lines
+.RB ( version
+etc.), terminated by
+.BR ok .
+The client can then send requests, one per line.  To each request,
+.B babeld
+replies with one or more lines of data terminated by one of
+.BR ok ,
+.BR no ,
+or
+.BR bad .
+
+The following requests are currently defined:
+.IP \(bu 2
+any configuration file directive, including
+.BR interface ;
+.IP \(bu
+.BR "flush interface" ;
+.IP \(bu
+.BR dump ;
+.IP \(bu
+.B monitor
+and
+.BR unmonitor ;
+.IP \(bu
+.BR quit .
 .SH EXAMPLES
 You can participate in a Babel network by simply running
 .IP
@@ -552,12 +643,21 @@ or, if you want to constrain the routes that you redistribute,
     \-C 'redistribute proto 11 ip ::/0 le 64 metric 256' \\
     \-C 'redistribute proto 11 ip 0.0.0.0/0 le 24 metric 256' \\
     wlan0
-.SS Source-sensitive routing
+.SS Source-specific routing
 .PP
 If your want to redistribute kernel routes as source-specific to the network,
 with the 2001:DB8:0:1::/64 prefix:
 .IP
 redistribute src-prefix 2001:DB8:0:1::/64
+.PP
+For more information about source-specific routing, please see
+.IP
+Matthieu Boutier and Juliusz Chroboczek.  Source-sensitive routing.  In
+Proc. IFIP Networking 2015.  2015.
+.PP
+available online at
+.IP
+http://arxiv.org/pdf/1403.0445v4.pdf
 .SH FILES
 .TP
 .B /etc/babeld.conf
@@ -582,6 +682,12 @@ Check interfaces and kernel routes right now, then reopen the log file.
 Babel is a completely insecure protocol: any attacker able to inject
 IP packets with a link-local source address can disrupt the protocol's
 operation.  This is no different from unsecured neighbour discovery or ARP.
+
+Usage of the
+.B \-G
+flag allows any user logged on the local host to change
+.BR babeld 's
+configuration.
 
 Since Babel uses link-local IPv6 packets only, there is no need to update
 firewalls to allow forwarding of Babel protocol packets.  If local

@@ -95,10 +95,9 @@ struct timeval check_neighbours_timeout, check_interfaces_timeout;
 
 static volatile sig_atomic_t exiting = 0, dumping = 0, reopening = 0;
 
-static int accept_local_connections(fd_set *readfds);
+static int accept_local_connections(void);
 static void init_signals(void);
 static void dump_tables(FILE *out);
-static int reopen_logfile(void);
 
 static int
 kernel_route_notify(struct kernel_route *route, void *closure)
@@ -173,7 +172,7 @@ main(int argc, char **argv)
 
     while(1) {
         opt = getopt(argc, argv,
-                     "m:p:h:H:i:k:A:sruS:d:g:lwz:M:t:T:c:C:DL:I:V");
+                     "m:p:h:H:i:k:A:sruS:d:g:G:lwz:M:t:T:c:C:DL:I:V");
         if(opt < 0)
             break;
 
@@ -238,13 +237,22 @@ main(int argc, char **argv)
                 goto usage;
             break;
         case 'g':
-#ifdef NO_LOCAL_INTERFACE
-            fprintf(stderr, "Warning: no local interface in this version.\n");
-#else
-            local_server_port = parse_nat(optarg);
-            if(local_server_port <= 0 || local_server_port > 0xFFFF)
-                goto usage;
-#endif
+        case 'G':
+            if(opt == 'g')
+                local_server_write = 0;
+            else
+                local_server_write = 1;
+            if(optarg[0] == '/') {
+                local_server_port = -1;
+                free(local_server_path);
+                local_server_path = strdup(optarg);
+            } else {
+                local_server_port = parse_nat(optarg);
+                free(local_server_path);
+                local_server_path = NULL;
+                if(local_server_port <= 0 || local_server_port > 0xFFFF)
+                    goto usage;
+            }
             break;
         case 'l':
             link_detect = 1;
@@ -292,8 +300,8 @@ main(int argc, char **argv)
             config_files[num_config_files++] = optarg;
             break;
         case 'C':
-            rc = parse_config_from_string(optarg);
-            if(rc < 0) {
+            rc = parse_config_from_string(optarg, strlen(optarg), NULL);
+            if(rc != CONFIG_ACTION_DONE) {
                 fprintf(stderr,
                         "Couldn't parse configuration from command line.\n");
                 exit(1);
@@ -517,15 +525,19 @@ main(int argc, char **argv)
         goto fail;
     }
 
-#ifndef NO_LOCAL_INTERFACE
     if(local_server_port >= 0) {
         local_server_socket = tcp_server_socket(local_server_port, 1);
         if(local_server_socket < 0) {
             perror("local_server_socket");
             goto fail;
         }
+    } else if(local_server_path) {
+        local_server_socket = unix_server_socket(local_server_path);
+        if(local_server_socket < 0) {
+            perror("local_server_socket");
+            goto fail;
+        }
     }
-#endif
 
     init_signals();
     rc = resize_receive_buffer(1500);
@@ -612,17 +624,15 @@ main(int argc, char **argv)
                 FD_SET(kernel_socket, &readfds);
                 maxfd = MAX(maxfd, kernel_socket);
             }
-#ifndef NO_LOCAL_INTERFACE
             if(local_server_socket >= 0 &&
                num_local_sockets < MAX_LOCAL_SOCKETS) {
                 FD_SET(local_server_socket, &readfds);
                 maxfd = MAX(maxfd, local_server_socket);
             }
             for(i = 0; i < num_local_sockets; i++) {
-                FD_SET(local_sockets[i], &readfds);
-                maxfd = MAX(maxfd, local_sockets[i]);
+                FD_SET(local_sockets[i].fd, &readfds);
+                maxfd = MAX(maxfd, local_sockets[i].fd);
             }
-#endif
             rc = select(maxfd + 1, &readfds, NULL, NULL, &tv);
             if(rc < 0) {
                 if(errno != EINTR) {
@@ -672,27 +682,24 @@ main(int argc, char **argv)
             }
         }
 
-#ifndef NO_LOCAL_INTERFACE
-        accept_local_connections(&readfds);
+        if(local_server_socket >= 0 && FD_ISSET(local_server_socket, &readfds))
+           accept_local_connections();
 
         i = 0;
         while(i < num_local_sockets) {
-            if(FD_ISSET(local_sockets[i], &readfds)) {
-                rc = local_read(local_sockets[i]);
+            if(FD_ISSET(local_sockets[i].fd, &readfds)) {
+                rc = local_read(&local_sockets[i]);
                 if(rc <= 0) {
                     if(rc < 0) {
-                        if(errno == EINTR)
+                        if(errno == EINTR || errno == EAGAIN)
                             continue;
                         perror("read(local_socket)");
                     }
-                    close(local_sockets[i]);
-                    local_sockets[i] = local_sockets[--num_local_sockets];
-                    continue;
+                    local_socket_destroy(i);
                 }
             }
             i++;
         }
-#endif
 
         if(reopening) {
             kernel_dump_time = now.tv_sec;
@@ -840,6 +847,10 @@ main(int argc, char **argv)
         }
         close(fd);
     }
+    if(local_server_socket >= 0 && local_server_path) {
+        unlink(local_server_path);
+        free(local_server_path);
+    }
     if(pidfile)
         unlink(pidfile);
     debugf("Done.\n");
@@ -853,13 +864,13 @@ main(int argc, char **argv)
             "               "
             "[-h hello] [-H wired_hello] [-z kind[,factor]]\n"
             "               "
-            "[-k metric] [-A metric] [-s] [-l] [-w] [-r] [-u] [-g port]\n"
+            "[-g port] [-G port] [-k metric] [-A metric] [-s] [-l] [-w] [-r]\n"
             "               "
-            "[-t table] [-T table] [-c file] [-C statement]\n"
+            "[-u] [-t table] [-T table] [-c file] [-C statement]\n"
             "               "
             "[-d level] [-D] [-L logfile] [-I pidfile]\n"
             "               "
-            "[id] interface...\n",
+            "interface...\n",
             BABELD_VERSION);
     exit(1);
 
@@ -878,11 +889,12 @@ main(int argc, char **argv)
 }
 
 static int
-accept_local_connections(fd_set *readfds)
+accept_local_connections()
 {
     int rc, s;
+    struct local_socket *ls;
 
-    if(local_server_socket < 0 || !FD_ISSET(local_server_socket, readfds))
+    if(local_server_socket < 0)
         return 0;
 
     s = accept(local_server_socket, NULL, NULL);
@@ -917,8 +929,13 @@ accept_local_connections(fd_set *readfds)
         return -1;
     }
 
-    local_sockets[num_local_sockets++] = s;
-    local_notify_all_1(s);
+    ls = local_socket_create(s);
+    if(ls == NULL) {
+        fprintf(stderr, "Unable create local socket.\n");
+        close(s);
+        return -1;
+    }
+    local_header(ls);
     return 1;
 }
 
@@ -949,26 +966,19 @@ schedule_interfaces_check(int msecs, int override)
 int
 resize_receive_buffer(int size)
 {
+    unsigned char *new;
+
     if(size <= receive_buffer_size)
         return 0;
 
-    if(receive_buffer == NULL) {
-        receive_buffer = malloc(size);
-        if(receive_buffer == NULL) {
-            perror("malloc(receive_buffer)");
-            return -1;
-        }
-        receive_buffer_size = size;
-    } else {
-        unsigned char *new;
-        new = realloc(receive_buffer, size);
-        if(new == NULL) {
-            perror("realloc(receive_buffer)");
-            return -1;
-        }
-        receive_buffer = new;
-        receive_buffer_size = size;
+    new = realloc(receive_buffer, size);
+    if(new == NULL) {
+        perror("realloc(receive_buffer)");
+        return -1;
     }
+    receive_buffer = new;
+    receive_buffer_size = size;
+
     return 1;
 }
 
@@ -1049,29 +1059,27 @@ dump_route(FILE *out, struct babel_route *route)
         NULL : route->nexthop;
     char channels[100];
 
-    if(route->channels[0] == 0)
+    if(route->channels_len == 0) {
         channels[0] = '\0';
-    else {
+    } else {
         int k, j = 0;
         snprintf(channels, 100, " chan (");
         j = strlen(channels);
-        for(k = 0; k < DIVERSITY_HOPS; k++) {
-            if(route->channels[k] == 0)
-                break;
+        for(k = 0; k < route->channels_len; k++) {
             if(k > 0)
                 channels[j++] = ',';
             snprintf(channels + j, 100 - j, "%u", (unsigned)route->channels[k]);
             j = strlen(channels);
         }
         snprintf(channels + j, 100 - j, ")");
-        if(k == 0)
-            channels[0] = '\0';
     }
 
-    fprintf(out, "%s from %s metric %d (%d) refmetric %d id %s "
+    fprintf(out, "%s%s%s metric %d (%d) refmetric %d id %s "
             "seqno %d%s age %d via %s neigh %s%s%s%s\n",
             format_prefix(route->src->prefix, route->src->plen),
-            format_prefix(route->src->src_prefix, route->src->src_plen),
+            route->src->src_plen > 0 ? " from " : "",
+            route->src->src_plen > 0 ?
+            format_prefix(route->src->src_prefix, route->src->src_plen) : "",
             route_metric(route), route_smoothed_metric(route), route->refmetric,
             format_eui64(route->src->id),
             (int)route->seqno,
@@ -1088,9 +1096,11 @@ dump_route(FILE *out, struct babel_route *route)
 static void
 dump_xroute(FILE *out, struct xroute *xroute)
 {
-    fprintf(out, "%s from %s metric %d (exported)\n",
+    fprintf(out, "%s%s%s metric %d (exported)\n",
             format_prefix(xroute->prefix, xroute->plen),
-            format_prefix(xroute->src_prefix, xroute->src_plen),
+            xroute->src_plen > 0 ? " from " : "",
+            xroute->src_plen > 0 ?
+            format_prefix(xroute->src_prefix, xroute->src_plen) : "",
             xroute->metric);
 }
 
@@ -1142,7 +1152,7 @@ dump_tables(FILE *out)
     fflush(out);
 }
 
-static int
+int
 reopen_logfile()
 {
     int lfd, rc;

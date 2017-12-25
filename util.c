@@ -230,8 +230,8 @@ in_prefix(const unsigned char *restrict address,
 }
 
 unsigned char *
-mask_prefix(unsigned char *restrict ret,
-            const unsigned char *restrict prefix, unsigned char plen)
+normalize_prefix(unsigned char *restrict ret,
+                 const unsigned char *restrict prefix, unsigned char plen)
 {
     if(plen >= 128) {
         memcpy(ret, prefix, 16);
@@ -383,7 +383,7 @@ parse_net(const char *net, unsigned char *prefix_r, unsigned char *plen_r,
             }
         }
     }
-    mask_prefix(prefix_r, prefix, plen);
+    normalize_prefix(prefix_r, prefix, plen);
     *plen_r = plen;
     if(af_r) *af_r = af;
     return 0;
@@ -495,6 +495,9 @@ prefix_cmp(const unsigned char *p1, unsigned char plen1,
            const unsigned char *p2, unsigned char plen2)
 {
     int plen = MIN(plen1, plen2);
+
+    if(v4mapped(p1) != v4mapped(p2))
+        return PST_DISJOINT;
 
     if(memcmp(p1, p2, plen / 8) != 0)
         return PST_DISJOINT;

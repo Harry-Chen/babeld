@@ -40,6 +40,7 @@ THE SOFTWARE.
 #include "message.h"
 #include "route.h"
 #include "configuration.h"
+#include "local.h"
 #include "xroute.h"
 
 struct interface *interfaces = NULL;
@@ -65,16 +66,18 @@ add_interface(char *ifname, struct interface_conf *if_conf)
 
     FOR_ALL_INTERFACES(ifp) {
         if(strcmp(ifp->name, ifname) == 0) {
-            assert(if_conf == NULL);
+            if(if_conf)
+                fprintf(stderr,
+                        "Warning: attempting to add existing interface, "
+                        "new configuration ignored.\n");
             return ifp;
         }
     }
 
-    ifp = malloc(sizeof(struct interface));
+    ifp = calloc(1, sizeof(struct interface));
     if(ifp == NULL)
         return NULL;
 
-    memset(ifp, 0, sizeof(struct interface));
     strncpy(ifp->name, ifname, IF_NAMESIZE);
     ifp->conf = if_conf ? if_conf : default_interface_conf;
     ifp->bucket_time = now.tv_sec;
@@ -86,7 +89,44 @@ add_interface(char *ifname, struct interface_conf *if_conf)
     else
         last_interface()->next = ifp;
 
+    local_notify_interface(ifp, LOCAL_ADD);
+
     return ifp;
+}
+
+int
+flush_interface(char *ifname)
+{
+    struct interface *ifp, *prev;
+
+    prev = NULL;
+    ifp = interfaces;
+    while(ifp) {
+        if(strcmp(ifp->name, ifname) == 0)
+            break;
+        prev = ifp;
+        ifp = ifp->next;
+    }
+
+    if(ifp == NULL)
+        return 0;
+
+    interface_up(ifp, 0);
+    if(prev)
+        prev->next = ifp->next;
+    else
+        interfaces = ifp->next;
+
+    local_notify_interface(ifp, LOCAL_FLUSH);
+
+    if(ifp->conf != NULL && ifp->conf != default_interface_conf)
+        flush_ifconf(ifp->conf);
+
+    local_notify_interface(ifp, LOCAL_FLUSH);
+
+    free(ifp);
+
+    return 1;
 }
 
 /* This should be no more than half the hello interval, so that hellos
@@ -138,6 +178,7 @@ check_interface_ipv4(struct interface *ifp)
                 ifp->ipv4 = malloc(4);
             if(ifp->ipv4)
                 memcpy(ifp->ipv4, ipv4, 4);
+            local_notify_interface(ifp, LOCAL_CHANGE);
             return 1;
         }
     } else {
@@ -146,6 +187,7 @@ check_interface_ipv4(struct interface *ifp)
             flush_interface_routes(ifp, 0);
             free(ifp->ipv4);
             ifp->ipv4 = NULL;
+            local_notify_interface(ifp, LOCAL_CHANGE);
             return 1;
         }
     }
@@ -156,24 +198,23 @@ static int
 check_interface_channel(struct interface *ifp)
 {
     int channel = IF_CONF(ifp, channel);
+    int rc = 1;
 
     if(channel == IF_CHANNEL_UNKNOWN) {
-        if((ifp->flags & IF_WIRED)) {
-            channel = IF_CHANNEL_NONINTERFERING;
-        } else {
-            channel = kernel_interface_channel(ifp->name, ifp->ifindex);
-            if(channel < 0)
-                fprintf(stderr,
-                        "Couldn't determine channel of interface %s: %s.\n",
-                        ifp->name, strerror(errno));
-            if(channel <= 0)
-                channel = IF_CHANNEL_INTERFERING;
+        /* IF_WIRELESS merely means that we know for sure that the
+           interface is wireless, so check unconditionally. */
+        channel = kernel_interface_channel(ifp->name, ifp->ifindex);
+        if(channel < 0) {
+            if((ifp->flags & IF_WIRELESS))
+                rc = -1;
+            channel = (ifp->flags & IF_WIRELESS) ?
+                IF_CHANNEL_INTERFERING : IF_CHANNEL_NONINTERFERING;
         }
     }
 
     if(ifp->channel != channel) {
         ifp->channel = channel;
-        return 1;
+        return rc;
     }
     return 0;
 }
@@ -183,29 +224,50 @@ check_link_local_addresses(struct interface *ifp)
 {
     struct kernel_route ll[32];
     int rc, i;
-    if(ifp->ll)
-        free(ifp->ll);
-    ifp->numll = 0;
-    ifp->ll = NULL;
+
     rc = kernel_addresses(ifp->ifindex, 1, ll, 32);
-    if(rc < 0) {
-        perror("kernel_addresses(link local)");
-        return -1;
-    } else if(rc == 0) {
-        fprintf(stderr, "Interface %s has no link-local address.\n",
-                ifp->name);
+    if(rc <= 0) {
+        if(rc < 0)
+            perror("kernel_addresses(link local)");
+        else
+            fprintf(stderr, "Interface %s has no link-local address.\n",
+                    ifp->name);
+        if(ifp->ll) {
+            free(ifp->ll);
+            ifp->numll = 0;
+            ifp->ll = NULL;
+        }
+        local_notify_interface(ifp, LOCAL_CHANGE);
         /* Most probably DAD hasn't finished yet.  Reschedule us
            real soon. */
         schedule_interfaces_check(2000, 0);
         return -1;
     } else {
-        ifp->ll = malloc(16 * rc);
-        if(ifp->ll == NULL) {
-            perror("malloc(ll)");
+        int changed;
+        if(rc == ifp->numll) {
+            changed = 0;
+            for(i = 0; i < rc; i++) {
+                if(memcmp(ifp->ll[i], ll[i].prefix, 16) != 0) {
+                    changed = 1;
+                    break;
+                }
+            }
         } else {
-            for(i = 0; i < rc; i++)
-                memcpy(ifp->ll[i], ll[i].prefix, 16);
-            ifp->numll = rc;
+            changed = 1;
+        }
+
+        if(changed) {
+            free(ifp->ll);
+            ifp->numll = 0;
+            ifp->ll = malloc(16 * rc);
+            if(ifp->ll == NULL) {
+                perror("malloc(ll)");
+            } else {
+                for(i = 0; i < rc; i++)
+                    memcpy(ifp->ll[i], ll[i].prefix, 16);
+                ifp->numll = rc;
+            }
+            local_notify_interface(ifp, LOCAL_CHANGE);
         }
     }
 
@@ -215,7 +277,7 @@ check_link_local_addresses(struct interface *ifp)
 int
 interface_up(struct interface *ifp, int up)
 {
-    int mtu, rc, wired;
+    int mtu, rc, type;
     struct ipv6_mreq mreq;
 
     if((!!up) == if_up(ifp))
@@ -275,64 +337,63 @@ interface_up(struct interface *ifp, int up)
                     "receive buffer for interface %s (%d) (%d bytes).\n",
                     ifp->name, ifp->ifindex, mtu);
 
-        if(IF_CONF(ifp, wired) == CONFIG_NO) {
-            wired = 0;
-        } else if(IF_CONF(ifp, wired) == CONFIG_YES) {
-            wired = 1;
-        } else if(all_wireless) {
-            wired = 0;
-        } else {
-            rc = kernel_interface_wireless(ifp->name, ifp->ifindex);
-            if(rc < 0) {
-                fprintf(stderr,
-                        "Warning: couldn't determine whether %s (%d) "
-                        "is a wireless interface.\n",
-                        ifp->name, ifp->ifindex);
-                wired = 0;
+        type = IF_CONF(ifp, type);
+        if(type == IF_TYPE_DEFAULT) {
+            if(all_wireless) {
+                type = IF_TYPE_WIRELESS;
             } else {
-                wired = !rc;
+                rc = kernel_interface_wireless(ifp->name, ifp->ifindex);
+                if(rc < 0) {
+                    fprintf(stderr,
+                            "Warning: couldn't determine whether %s (%d) "
+                            "is a wireless interface.\n",
+                            ifp->name, ifp->ifindex);
+                } else if(rc) {
+                    type = IF_TYPE_WIRELESS;
+                }
             }
         }
+        printf("Type: %d\n", type);
 
-        if(wired) {
-            ifp->flags |= IF_WIRED;
-            ifp->cost = IF_CONF(ifp, cost);
-            if(ifp->cost <= 0) ifp->cost = 96;
-            if(IF_CONF(ifp, split_horizon) == CONFIG_NO)
-                ifp->flags &= ~IF_SPLIT_HORIZON;
-            else if(IF_CONF(ifp, split_horizon) == CONFIG_YES)
-                ifp->flags |= IF_SPLIT_HORIZON;
-            else if(split_horizon)
-                ifp->flags |= IF_SPLIT_HORIZON;
-            else
-                ifp->flags &= ~IF_SPLIT_HORIZON;
-            if(IF_CONF(ifp, lq) == CONFIG_YES)
-                ifp->flags |= IF_LQ;
-            else
-                ifp->flags &= ~IF_LQ;
-        } else {
-            ifp->flags &= ~IF_WIRED;
-            ifp->cost = IF_CONF(ifp, cost);
-            if(ifp->cost <= 0) ifp->cost = 256;
-            if(IF_CONF(ifp, split_horizon) == CONFIG_YES)
-                ifp->flags |= IF_SPLIT_HORIZON;
-            else
-                ifp->flags &= ~IF_SPLIT_HORIZON;
-            if(IF_CONF(ifp, lq) == CONFIG_NO)
-                ifp->flags &= ~IF_LQ;
-            else
-                ifp->flags |= IF_LQ;
-        }
+        /* Type is CONFIG_TYPE_AUTO if interface is not known to be
+           wireless, so provide sane defaults for that case. */
+
+        if(type == IF_TYPE_WIRELESS)
+            ifp->flags |= IF_WIRELESS;
+        else
+            ifp->flags &= ~IF_WIRELESS;
+
+        ifp->cost = IF_CONF(ifp, cost);
+        if(ifp->cost <= 0)
+            ifp->cost = type == IF_TYPE_WIRELESS ? 256 : 96;
+
+        if(IF_CONF(ifp, split_horizon) == CONFIG_YES)
+            ifp->flags |= IF_SPLIT_HORIZON;
+        else if(IF_CONF(ifp, split_horizon) == CONFIG_NO)
+            ifp->flags &= ~IF_SPLIT_HORIZON;
+        else if(type == IF_TYPE_WIRED)
+            ifp->flags |= IF_SPLIT_HORIZON;
+        else
+            ifp->flags &= ~IF_SPLIT_HORIZON;
+
+        if(IF_CONF(ifp, lq) == CONFIG_YES)
+            ifp->flags |= IF_LQ;
+        else if(IF_CONF(ifp, lq) == CONFIG_NO)
+            ifp->flags &= ~IF_LQ;
+        else if(type == IF_TYPE_WIRELESS)
+            ifp->flags |= IF_LQ;
+        else
+            ifp->flags &= ~IF_LQ;
 
         if(IF_CONF(ifp, faraway) == CONFIG_YES)
             ifp->flags |= IF_FARAWAY;
 
         if(IF_CONF(ifp, hello_interval) > 0)
             ifp->hello_interval = IF_CONF(ifp, hello_interval);
-        else if((ifp->flags & IF_WIRED))
-            ifp->hello_interval = default_wired_hello_interval;
-        else
+        else if(type == IF_TYPE_WIRELESS)
             ifp->hello_interval = default_wireless_hello_interval;
+        else
+            ifp->hello_interval = default_wired_hello_interval;
 
         ifp->update_interval =
             IF_CONF(ifp, update_interval) > 0 ?
@@ -357,11 +418,22 @@ interface_up(struct interface *ifp, int up)
             ifp->rtt_max = ifp->rtt_min + 10000;
         }
         ifp->max_rtt_penalty = IF_CONF(ifp, max_rtt_penalty);
+        if(ifp->max_rtt_penalty == 0 && type == IF_TYPE_TUNNEL)
+            ifp->max_rtt_penalty = 96;
 
-        if(IF_CONF(ifp, enable_timestamps) == CONFIG_YES ||
-           (IF_CONF(ifp, enable_timestamps) == CONFIG_DEFAULT &&
-            ifp->max_rtt_penalty > 0))
+        if(IF_CONF(ifp, enable_timestamps) == CONFIG_YES)
             ifp->flags |= IF_TIMESTAMPS;
+        else if(IF_CONF(ifp, enable_timestamps) == CONFIG_NO)
+            ifp->flags &= ~IF_TIMESTAMPS;
+        else if(type == IF_TYPE_TUNNEL)
+            ifp->flags |= IF_TIMESTAMPS;
+        else
+            ifp->flags &= ~IF_TIMESTAMPS;
+        if(ifp->max_rtt_penalty > 0 && !(ifp->flags & IF_TIMESTAMPS))
+            fprintf(stderr,
+                    "Warning: max_rtt_penalty is set "
+                    "but timestamps are disabled on interface %s.\n",
+                    ifp->name);
 
         rc = check_link_local_addresses(ifp);
         if(rc < 0) {
@@ -377,13 +449,16 @@ interface_up(struct interface *ifp, int up)
             goto fail;
         }
 
-        check_interface_channel(ifp);
+        rc = check_interface_channel(ifp);
+        if(rc < 0)
+            fprintf(stderr,
+                    "Warning: couldn't determine channel of interface %s.\n",
+                    ifp->name);
         update_interface_metric(ifp);
         rc = check_interface_ipv4(ifp);
 
-        debugf("Upped interface %s (%s, cost=%d, channel=%d%s).\n",
+        debugf("Upped interface %s (cost=%d, channel=%d%s).\n",
                ifp->name,
-               (ifp->flags & IF_WIRED) ? "wired" : "wireless",
                ifp->cost,
                ifp->channel,
                ifp->ipv4 ? ", IPv4" : "");
@@ -421,11 +496,14 @@ interface_up(struct interface *ifp, int up)
         ifp->numll = 0;
     }
 
+    local_notify_interface(ifp, LOCAL_CHANGE);
+
     return 1;
 
  fail:
     assert(up);
     interface_up(ifp, 0);
+    local_notify_interface(ifp, LOCAL_CHANGE);
     return -1;
 }
 

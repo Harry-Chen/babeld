@@ -47,6 +47,11 @@ struct filter *install_filters = NULL;
 struct interface_conf *default_interface_conf = NULL;
 struct interface_conf *interface_confs = NULL;
 
+/* This indicates whether initial configuration is done.  See
+   finalize_config below. */
+
+int config_finalised = 0;
+
 /* This file implements a recursive descent parser with one character
    lookahead.  The looked-ahead character is returned from most
    functions.
@@ -60,7 +65,7 @@ typedef int (*gnc_t)(void*);
 static int
 skip_whitespace(int c, gnc_t gnc, void *closure)
 {
-    while(c == ' ' || c == '\t')
+    while(c == ' ' || c == '\t' || c == '\r')
         c = gnc(closure);
     return c;
 }
@@ -76,6 +81,17 @@ skip_to_eol(int c, gnc_t gnc, void *closure)
 }
 
 static int
+skip_eol(int c, gnc_t gnc, void *closure)
+{
+    c = skip_whitespace(c, gnc, closure);
+    if(c < 0 || c == '\n' || c == '#') {
+        c = skip_to_eol(c, gnc, closure);
+        return c;
+    }
+    return -2;
+}
+
+static int
 getword(int c, char **token_r, gnc_t gnc, void *closure)
 {
     char buf[256];
@@ -88,9 +104,11 @@ getword(int c, char **token_r, gnc_t gnc, void *closure)
         if(i >= 255) return -2;
         buf[i++] = c;
         c = gnc(closure);
-    } while(c != ' ' && c != '\t' && c != '\n' && c != '#' && c >= 0);
+    } while(c != ' ' && c != '\t' && c != '\r' && c != '\n' && c != '#' && c >= 0);
     buf[i] = '\0';
     *token_r = strdup(buf);
+    if(*token_r == NULL)
+        return -2;
     return c;
 }
 
@@ -128,6 +146,8 @@ getstring(int c, char **token_r, gnc_t gnc, void *closure)
 
     buf[i] = '\0';
     *token_r = strdup(buf);
+    if(*token_r == NULL)
+        return -2;
     return c;
 }
 
@@ -168,7 +188,7 @@ getthousands(int c, int *int_r, gnc_t gnc, void *closure)
 }
 
 static int
-getbool(int c, int *int_r, gnc_t gnc, void *closure)
+getbool(int c, int *bool_r, gnc_t gnc, void *closure)
 {
     char *t;
     int i;
@@ -186,7 +206,7 @@ getbool(int c, int *int_r, gnc_t gnc, void *closure)
         return -2;
     }
     free(t);
-    *int_r = i;
+    *bool_r = i;
     return c;
 }
 
@@ -276,6 +296,32 @@ getnet(int c, unsigned char **p_r, unsigned char *plen_r, int *af_r,
 }
 
 static int
+get_interface_type(int c, int *type_r, gnc_t gnc, void *closure)
+{
+    char *t;
+    int i;
+    c = getword(c, &t, gnc, closure);
+    if(c < -1)
+        return c;
+    if(strcmp(t, "default") == 0 || strcmp(t, "auto") == 0) {
+        i = IF_TYPE_DEFAULT;
+    } else if(strcmp(t, "wired") == 0) {
+        i = IF_TYPE_WIRED;
+    } else if(strcmp(t, "wireless") == 0) {
+        i = IF_TYPE_WIRELESS;
+    } else if(strcmp(t, "tunnel") == 0) {
+        i = IF_TYPE_TUNNEL;
+    } else {
+        free(t);
+        return -2;
+    }
+    free(t);
+    *type_r = i;
+    return c;
+}
+
+
+static int
 parse_filter(int c, gnc_t gnc, void *closure, struct filter **filter_return)
 {
     char *token;
@@ -283,7 +329,7 @@ parse_filter(int c, gnc_t gnc, void *closure, struct filter **filter_return)
 
     filter = calloc(1, sizeof(struct filter));
     if(filter == NULL)
-        goto error;
+        return -2;
     filter->plen_le = 128;
     filter->src_plen_le = 128;
 
@@ -294,8 +340,10 @@ parse_filter(int c, gnc_t gnc, void *closure, struct filter **filter_return)
             break;
         }
         c = getword(c, &token, gnc, closure);
-        if(c < -1)
-            goto error;
+        if(c < -1) {
+            free(filter);
+            return -2;
+        }
 
         if(strcmp(token, "ip") == 0) {
             int af;
@@ -429,6 +477,7 @@ parse_filter(int c, gnc_t gnc, void *closure, struct filter **filter_return)
     return c;
 
  error:
+    free(token);
     free(filter);
     return -2;
 }
@@ -475,12 +524,21 @@ parse_anonymous_ifconf(int c, gnc_t gnc, void *closure,
             if(c < -1 || interval <= 0 || interval > 10 * 0xFFFF)
                 goto error;
             if_conf->update_interval = interval;
+        } else if(strcmp(token, "type") == 0) {
+            int type = IF_TYPE_DEFAULT;
+            c = get_interface_type(c, &type, gnc, closure);
+            if(c < -1)
+                goto error;
+            if_conf->type = type;
         } else if(strcmp(token, "wired") == 0) {
             int v;
+            fprintf(stderr, "Warning: keyword \"wired\" is deprecated -- "
+                    "please use \"type\" instead.\n");
             c = getbool(c, &v, gnc, closure);
             if(c < -1)
                 goto error;
-            if_conf->wired = v;
+            if_conf->type = (v == CONFIG_YES) ?
+                IF_TYPE_WIRED : IF_TYPE_WIRELESS;
         } else if(strcmp(token, "faraway") == 0) {
             int v;
             c = getbool(c, &v, gnc, closure);
@@ -546,11 +604,11 @@ parse_anonymous_ifconf(int c, gnc_t gnc, void *closure,
                 goto error;
             if_conf->rtt_max = rtt;
         } else if(strcmp(token, "max-rtt-penalty") == 0) {
-            int cost;
-            c = getint(c, &cost, gnc, closure);
-            if(c < -1 || cost <= 0 || cost > 0xFFFF)
+            int penalty;
+            c = getint(c, &penalty, gnc, closure);
+            if(c < -1 || penalty <= 0 || penalty > 0xFFFF)
                 goto error;
-            if_conf->max_rtt_penalty = cost;
+            if_conf->max_rtt_penalty = penalty;
         } else {
             goto error;
         }
@@ -626,7 +684,7 @@ merge_ifconf(struct interface_conf *dest,
     MERGE(hello_interval);
     MERGE(update_interval);
     MERGE(cost);
-    MERGE(wired);
+    MERGE(type);
     MERGE(split_horizon);
     MERGE(lq);
     MERGE(faraway);
@@ -654,7 +712,8 @@ add_ifconf(struct interface_conf *if_conf, struct interface_conf **if_confs)
             if(strcmp(next->ifname, if_conf->ifname) == 0) {
                 merge_ifconf(next, if_conf, next);
                 free(if_conf);
-                return;
+                if_conf = next;
+                goto done;
             }
             prev = next;
             next = next->next;
@@ -662,17 +721,54 @@ add_ifconf(struct interface_conf *if_conf, struct interface_conf **if_confs)
         if_conf->next = NULL;
         prev->next = if_conf;
     }
+
+ done:
+    if(config_finalised)
+        add_interface(if_conf->ifname, if_conf);
+}
+
+void
+flush_ifconf(struct interface_conf *if_conf)
+{
+    if(if_conf == interface_confs) {
+        interface_confs = if_conf->next;
+        free(if_conf);
+        return;
+    } else {
+        struct interface_conf *prev = interface_confs;
+        while(prev) {
+            if(prev->next == if_conf) {
+                prev->next = if_conf->next;
+                free(if_conf);
+                return;
+            }
+            prev = prev->next;
+        }
+    }
+    fprintf(stderr, "Warning: attempting to free nonexistent ifconf.\n");
 }
 
 static int
 parse_option(int c, gnc_t gnc, void *closure, char *token)
 {
+    /* These are the only options that are allowed at runtime, either
+       because they require no special setup or because there is special
+       case code for them. */
+    if(config_finalised) {
+        if(strcmp(token, "keep-unfeasible") != 0 &&
+           strcmp(token, "link-detect") != 0 &&
+           strcmp(token, "log-file") != 0 &&
+           strcmp(token, "diversity") != 0 &&
+           strcmp(token, "diversity-factor") != 0 &&
+           strcmp(token, "smoothing-half-life") != 0)
+            goto error;
+    }
+
     if(strcmp(token, "protocol-port") == 0 ||
        strcmp(token, "kernel-priority") == 0 ||
        strcmp(token, "allow-duplicates") == 0 ||
-#ifndef NO_LOCAL_INTERFACE
        strcmp(token, "local-port") == 0 ||
-#endif
+       strcmp(token, "local-port-readwrite") == 0 ||
        strcmp(token, "export-table") == 0 ||
        strcmp(token, "import-table") == 0) {
         int v;
@@ -686,11 +782,17 @@ parse_option(int c, gnc_t gnc, void *closure, char *token)
             kernel_metric = v;
         else if(strcmp(token, "allow_duplicates") == 0)
             allow_duplicates = v;
-#ifndef NO_LOCAL_INTERFACE
-        else if(strcmp(token, "local-port") == 0)
+        else if(strcmp(token, "local-port") == 0) {
             local_server_port = v;
-#endif
-        else if(strcmp(token, "export-table") == 0)
+            free(local_server_path);
+            local_server_path = NULL;
+            local_server_write = 0;
+        } else if(strcmp(token, "local-port-readwrite") == 0) {
+            local_server_port = v;
+            free(local_server_path);
+            local_server_path = NULL;
+            local_server_write = 1;
+        } else if(strcmp(token, "export-table") == 0)
             export_table = v;
         else if(strcmp(token, "import-table") == 0)
             add_import_table(v);
@@ -733,18 +835,32 @@ parse_option(int c, gnc_t gnc, void *closure, char *token)
         free(group);
     } else if(strcmp(token, "state-file") == 0 ||
               strcmp(token, "log-file") == 0 ||
-              strcmp(token, "pid-file") == 0) {
+              strcmp(token, "pid-file") == 0 ||
+              strcmp(token, "local-path") == 0 ||
+              strcmp(token, "local-path-readwrite") == 0) {
         char *file;
         c = getstring(c, &file, gnc, closure);
         if(c < -1)
             goto error;
         if(strcmp(token, "state-file") == 0)
             state_file = file;
-        else if(strcmp(token, "log-file") == 0)
+        else if(strcmp(token, "log-file") == 0) {
             logfile = file;
-        else if(strcmp(token, "pid-file") == 0)
+            if(config_finalised)
+                reopen_logfile();
+        } else if(strcmp(token, "pid-file") == 0)
             pidfile = file;
-        else
+        else if(strcmp(token, "local-path") == 0) {
+            local_server_port = -1;
+            free(local_server_path);
+            local_server_path = file;
+            local_server_write = 0;
+        } else if(strcmp(token, "local-path-readwrite") == 0) {
+            local_server_port = -1;
+            free(local_server_path);
+            local_server_path = file;
+            local_server_write = 1;
+        } else
             abort();
     } else if(strcmp(token, "debug") == 0) {
         int d;
@@ -803,90 +919,157 @@ parse_option(int c, gnc_t gnc, void *closure, char *token)
         goto error;
     }
 
-    c = skip_whitespace(c, gnc, closure);
-    if(c < 0 || c == '\n' || c == '#') {
-        c = skip_to_eol(c, gnc, closure);
-        return c;
-    }
-
-    /* Fall through */
+    return skip_eol(c, gnc, closure);
  error:
     return -2;
 
 }
 
 static int
-parse_config(gnc_t gnc, void *closure)
+parse_config_line(int c, gnc_t gnc, void *closure,
+                  int *action_return, const char **message_return)
 {
-    int c;
     char *token;
+    if(action_return)
+        *action_return = CONFIG_ACTION_DONE;
+    if(message_return)
+        *message_return = NULL;
 
-    c = gnc(closure);
+    c = skip_whitespace(c, gnc, closure);
+    if(c < 0 || c == '\n' || c == '#')
+        return skip_to_eol(c, gnc, closure);
+
+    c = getword(c, &token, gnc, closure);
     if(c < -1)
-        return -1;
+        return c;
 
-    while(1) {
-        c = skip_whitespace(c, gnc, closure);
-        if(c == '\n' || c == '#') {
-            c = skip_to_eol(c, gnc, closure);
-            continue;
-        }
-        if(c < 0)
-            break;
-        c = getword(c, &token, gnc, closure);
+    /* Directives allowed in read-only mode */
+    if(strcmp(token, "quit") == 0) {
+        c = skip_eol(c, gnc, closure);
+        if(c < -1 || !action_return)
+            goto fail;
+        *action_return = CONFIG_ACTION_QUIT;
+    } else if(strcmp(token, "dump") == 0) {
+        c = skip_eol(c, gnc, closure);
+        if(c < -1 || !action_return)
+            goto fail;
+        *action_return = CONFIG_ACTION_DUMP;
+    } else if(strcmp(token, "monitor") == 0) {
+        c = skip_eol(c, gnc, closure);
+        if(c < -1 || !action_return)
+            goto fail;
+        *action_return = CONFIG_ACTION_MONITOR;
+    } else if(strcmp(token, "unmonitor") == 0) {
+        c = skip_eol(c, gnc, closure);
+        if(c < -1 || !action_return)
+            goto fail;
+        *action_return = CONFIG_ACTION_UNMONITOR;
+    } else if(config_finalised && !local_server_write) {
+        /* The remaining directives are only allowed in read-write mode. */
+        c = skip_to_eol(c, gnc, closure);
+        if(c < -1 || !action_return)
+            goto fail;
+        /* Unfortunately, we cannot report NO here, since we don't know if
+           the line is parsable.  Oh, well. */
+        goto fail;
+    } else if(strcmp(token, "in") == 0) {
+        struct filter *filter;
+        if(config_finalised)
+            goto fail;
+        c = parse_filter(c, gnc, closure, &filter);
         if(c < -1)
-            return -1;
-
-        if(strcmp(token, "in") == 0) {
-            struct filter *filter;
-            c = parse_filter(c, gnc, closure, &filter);
-            if(c < -1)
-                return -1;
-            add_filter(filter, &input_filters);
-        } else if(strcmp(token, "out") == 0) {
-            struct filter *filter;
-            c = parse_filter(c, gnc, closure, &filter);
-            if(c < -1)
-                return -1;
-            add_filter(filter, &output_filters);
-        } else if(strcmp(token, "redistribute") == 0) {
-            struct filter *filter;
-            c = parse_filter(c, gnc, closure, &filter);
-            if(c < -1)
-                return -1;
-            add_filter(filter, &redistribute_filters);
-        } else if(strcmp(token, "install") == 0) {
-            struct filter *filter;
-            c = parse_filter(c, gnc, closure, &filter);
-            if(c < -1)
-                return -1;
-            add_filter(filter, &install_filters);
-        } else if(strcmp(token, "interface") == 0) {
-            struct interface_conf *if_conf;
-            c = parse_ifconf(c, gnc, closure, &if_conf);
-            if(c < -1)
-                return -1;
-            add_ifconf(if_conf, &interface_confs);
-        } else if(strcmp(token, "default") == 0) {
-            struct interface_conf *if_conf;
-            c = parse_anonymous_ifconf(c, gnc, closure, NULL, &if_conf);
-            if(c < -1)
-                return -1;
-            if(default_interface_conf == NULL)
-                default_interface_conf = if_conf;
-            else {
-                merge_ifconf(default_interface_conf,
-                             if_conf, default_interface_conf);
-                free(if_conf);
-            }
-        } else {
-            c = parse_option(c, gnc, closure, token);
-            if(c < -1)
-                return -1;
+            goto fail;
+        add_filter(filter, &input_filters);
+    } else if(strcmp(token, "out") == 0) {
+        struct filter *filter;
+        if(config_finalised)
+            goto fail;
+        c = parse_filter(c, gnc, closure, &filter);
+        if(c < -1)
+            goto fail;
+        add_filter(filter, &output_filters);
+    } else if(strcmp(token, "redistribute") == 0) {
+        struct filter *filter;
+        if(config_finalised)
+            goto fail;
+        c = parse_filter(c, gnc, closure, &filter);
+        if(c < -1)
+            goto fail;
+        add_filter(filter, &redistribute_filters);
+    } else if(strcmp(token, "install") == 0) {
+        struct filter *filter;
+        if(config_finalised)
+            goto fail;
+        c = parse_filter(c, gnc, closure, &filter);
+        if(c < -1)
+            goto fail;
+    } else if(strcmp(token, "interface") == 0) {
+        struct interface_conf *if_conf;
+        c = parse_ifconf(c, gnc, closure, &if_conf);
+        if(c < -1)
+            goto fail;
+        add_ifconf(if_conf, &interface_confs);
+    } else if(strcmp(token, "default") == 0) {
+        struct interface_conf *if_conf;
+        c = parse_anonymous_ifconf(c, gnc, closure, NULL, &if_conf);
+        if(c < -1)
+            goto fail;
+        if(default_interface_conf == NULL)
+            default_interface_conf = if_conf;
+        else {
+            merge_ifconf(default_interface_conf,
+                         if_conf, default_interface_conf);
+            free(if_conf);
         }
-        free(token);
+    } else if(strcmp(token, "flush") == 0) {
+        char *token2;
+        c = skip_whitespace(c, gnc, closure);
+        c = getword(c, &token2, gnc, closure);
+        if(c < -1)
+            goto fail;
+        if(strcmp(token2, "interface") == 0) {
+            char *ifname;
+            int rc;
+            c = getword(c, &ifname, gnc, closure);
+            c = skip_eol(c, gnc, closure);
+            if(c < -1) {
+                free(token2);
+                goto fail;
+            }
+            rc = flush_interface(ifname);
+            if(rc <= 0) {
+                if(action_return)
+                    *action_return = CONFIG_ACTION_NO;
+                if(message_return) {
+                    if(rc < 0)
+                        *message_return = "Couldn't flush interface";
+                    else
+                        *message_return = "No such interface";
+                }
+            }
+            free(token2);
+            free(ifname);
+        } else {
+            free(token2);
+            goto fail;
+        }
+    } else if(strcmp(token, "reopen-logfile") == 0) {
+        c = skip_eol(c, gnc, closure);
+        if(c < -1 || !action_return)
+            goto fail;
+        reopen_logfile();
+    } else {
+        c = parse_option(c, gnc, closure, token);
+        if(c < -1)
+            goto fail;
     }
-    return 1;
+
+    free(token);
+    return c;
+
+ fail:
+    free(token);
+    return -2;
 }
 
 struct file_state {
@@ -908,7 +1091,7 @@ int
 parse_config_from_file(const char *filename, int *line_return)
 {
     struct file_state s = { NULL, 1 };
-    int rc;
+    int c;
 
     s.f = fopen(filename, "r");
     if(s.f == NULL) {
@@ -916,32 +1099,56 @@ parse_config_from_file(const char *filename, int *line_return)
         return -1;
     }
 
-    rc = parse_config((gnc_t)gnc_file, &s);
+    c = gnc_file(&s);
+    if(c < 0)
+        return 0;
+
+    while(1) {
+        c = parse_config_line(c, (gnc_t)gnc_file, &s, NULL, NULL);
+        if(c < -1) {
+            *line_return = s.line;
+            return -1;
+        }
+        if(c == -1)
+            break;
+    }
     fclose(s.f);
 
-    *line_return = s.line;
-    return rc;
+    return 1;
 }
 
-struct string_state {
-    char *string;
-    int n;
+struct buf_state {
+    char *buf;
+    int i, n;
 };
 
 static int
-gnc_string(struct string_state *s)
+gnc_buf(struct buf_state *s)
 {
-    if(s->string[s->n] == '\0')
-        return -1;
+    if(s->i < s->n)
+        return (s->buf[s->i++]) & 0xFF;
     else
-        return s->string[s->n++];
+        return -1;
 }
 
 int
-parse_config_from_string(char *string)
+parse_config_from_string(char *string, int n, const char **message_return)
 {
-    struct string_state s = { string, 0 };
-    return parse_config((gnc_t)gnc_string, &s);
+    int c, action;
+    const char *message;
+    struct buf_state s = { string, 0, n };
+
+    c = gnc_buf(&s);
+    if(c < 0)
+        return -1;
+
+    c = parse_config_line(c, (gnc_t)gnc_buf, &s, &action, &message);
+    if(c == -1) {
+        if(message_return)
+            *message_return = message;
+        return action;
+    } else
+        return -1;
 }
 
 static void
@@ -1133,6 +1340,8 @@ finalise_config()
             return -1;
         }
     }
+
+    config_finalised = 1;
 
     return 1;
 }

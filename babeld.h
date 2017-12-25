@@ -99,6 +99,8 @@ extern int have_id;
 extern const unsigned char zeroes[16], ones[16];
 
 extern int protocol_port, local_server_port;
+extern char *local_server_path;
+extern int local_server_write;
 extern unsigned char protocol_group[16];
 extern int protocol_socket;
 extern int kernel_socket;
@@ -107,3 +109,4 @@ extern int max_request_hopcount;
 void schedule_neighbours_check(int msecs, int override);
 void schedule_interfaces_check(int msecs, int override);
 int resize_receive_buffer(int size);
+int reopen_logfile(void);

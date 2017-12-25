@@ -28,26 +28,30 @@ struct xroute;
 #define LOCAL_ADD 1
 #define LOCAL_CHANGE 2
 
-#ifndef NO_LOCAL_INTERFACE
-
 #ifndef MAX_LOCAL_SOCKETS
 #define MAX_LOCAL_SOCKETS 4
 #endif
 
-extern int local_server_socket, local_sockets[MAX_LOCAL_SOCKETS];
+#define LOCAL_BUFSIZE 1024
+
+struct local_socket {
+    int fd;
+    char *buf;
+    int n;
+    int monitor;
+};
+
+extern int local_server_socket;
+extern struct local_socket local_sockets[MAX_LOCAL_SOCKETS];
 extern int num_local_sockets;
 extern int local_server_port;
+extern char *local_server_path;
 
-int local_read(int s);
+void local_notify_interface(struct interface *ifp, int kind);
 void local_notify_neighbour(struct neighbour *neigh, int kind);
 void local_notify_xroute(struct xroute *xroute, int kind);
 void local_notify_route(struct babel_route *route, int kind);
-void local_notify_all_1(int s);
-
-#else
-
-#define local_notify_neighbour(n, k) do {} while(0)
-#define local_notify_xroute(x, k) do {} while(0)
-#define local_notify_route(r, k) do {} while(0)
-#define local_dump() do {} while 0
-#endif
+int local_read(struct local_socket *s);
+int local_header(struct local_socket *s);
+struct local_socket *local_socket_create(int fd);
+void local_socket_destroy(int i);
