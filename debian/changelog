@@ -1,3 +1,14 @@
+babeld (1.8.1-1) unstable; urgency=medium
+
+  * New upstream release (Closes: #884493).
+  * Add myself as uploader.  Thanks kilobyte!
+  * Update Vcs fields to salsa.
+  * Bump standards to 4.1.4.
+  * Change package priority to optional.
+  * Depend on lsb-base.
+
+ -- Benda Xu <heroxbd@gentoo.org>  Sat, 14 Apr 2018 11:18:07 +0900
+
 babeld (1.8.0-1) unstable; urgency=medium
 
   * New upstream release
