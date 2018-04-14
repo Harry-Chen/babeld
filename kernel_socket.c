@@ -312,7 +312,6 @@ kernel_interface_operational(const char *ifname, int ifindex)
         return -1;
 
     memset(&req, 0, sizeof(req));
-    memset(&req, 0, sizeof(req));
     strncpy(req.ifr_name, ifname, sizeof(req.ifr_name));
     rc = ioctl(s, SIOCGIFFLAGS, &req);
     close(s);
@@ -424,7 +423,7 @@ kernel_route(int operation, int table,
             0x00, 0x00, 0x00, 0x00, 0x7f, 0x00, 0x00, 0x01 }}};
 
     /* Source-specific routes are not implemented yet for BSD. */
-    if(src_plen > 0) {
+    if(!is_default(src, src_plen)) {
         errno = ENOSYS;
         return -1;
     }
