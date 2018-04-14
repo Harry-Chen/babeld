@@ -47,7 +47,6 @@ int kernel_metric = 0, reflect_kernel_metric = 0;
 int allow_duplicates = -1;
 int diversity_kind = DIVERSITY_NONE;
 int diversity_factor = 256;     /* in units of 1/256 */
-int keep_unfeasible = 0;
 
 static int smoothing_half_life = 0;
 static int two_to_the_one_over_hl = 0; /* 2^(1/hl) * 0x10000 */
@@ -59,7 +58,7 @@ check_specific_first(void)
     int specific = 1;
     int i;
     for(i = 0; i < route_slots; i++) {
-        if(routes[i]->src->src_plen == 0) {
+        if(is_default(routes[i]->src->src_prefix, routes[i]->src->src_plen)) {
             specific = 0;
         } else if(!specific) {
             return 0;
@@ -78,11 +77,13 @@ route_compare(const unsigned char *prefix, unsigned char plen,
               struct babel_route *route)
 {
     int i;
+    int is_ss = !is_default(src_prefix, src_plen);
+    int is_ss_rt = !is_default(route->src->src_prefix, route->src->src_plen);
 
     /* Put all source-specific routes in the front of the list. */
-    if(src_plen == 0 && route->src->src_plen > 0) {
+    if(!is_ss && is_ss_rt) {
         return 1;
-    } else if(src_plen > 0 && route->src->src_plen == 0) {
+    } else if(is_ss && !is_ss_rt) {
         return -1;
     }
 
@@ -95,10 +96,7 @@ route_compare(const unsigned char *prefix, unsigned char plen,
     if(plen > route->src->plen)
         return 1;
 
-    if(src_plen == 0) {
-        if(route->src->src_plen > 0)
-            return -1;
-    } else {
+    if(is_ss) {
         i = memcmp(src_prefix, route->src->src_prefix, 16);
         if(i != 0)
             return i;
@@ -401,7 +399,8 @@ route_stream_next(struct route_stream *stream)
     if(stream->installed) {
         while(stream->index < route_slots)
             if(stream->installed == ROUTE_SS_INSTALLED &&
-               routes[stream->index]->src->src_plen == 0)
+               is_default(routes[stream->index]->src->src_prefix,
+                          routes[stream->index]->src->src_plen))
                 return NULL;
             else if(routes[stream->index]->installed)
                 break;
@@ -435,14 +434,14 @@ route_stream_done(struct route_stream *stream)
 int
 metric_to_kernel(int metric)
 {
-	if(metric >= INFINITY) {
-		return KERNEL_INFINITY;
-	} else if(reflect_kernel_metric) {
-		int r = kernel_metric + metric;
-		return r >= KERNEL_INFINITY ? KERNEL_INFINITY : r;
-	} else {
-		return kernel_metric;
-	}
+        if(metric >= INFINITY) {
+                return KERNEL_INFINITY;
+        } else if(reflect_kernel_metric) {
+                int r = kernel_metric + metric;
+                return r >= KERNEL_INFINITY ? KERNEL_INFINITY : r;
+        } else {
+                return kernel_metric;
+        }
 }
 
 /* This is used to maintain the invariant that the installed route is at
@@ -850,22 +849,16 @@ update_route(const unsigned char *id,
     if(memcmp(id, myid, 8) == 0)
         return NULL;
 
-    if(martian_prefix(prefix, plen)) {
-        fprintf(stderr, "Rejecting martian route to %s through %s.\n",
-                format_prefix(prefix, plen), format_address(nexthop));
-        return NULL;
-    }
-    if(src_plen != 0 && martian_prefix(src_prefix, src_plen)) {
+    if(martian_prefix(prefix, plen) || martian_prefix(src_prefix, src_plen)) {
         fprintf(stderr, "Rejecting martian route to %s from %s through %s.\n",
                 format_prefix(prefix, plen),
-                format_prefix(src_prefix, src_plen), format_eui64(id));
+                format_prefix(src_prefix, src_plen), format_address(nexthop));
         return NULL;
     }
 
     is_v4 = v4mapped(prefix);
-    if(src_plen != 0 && is_v4 != v4mapped(src_prefix))
+    if(is_v4 != v4mapped(src_prefix))
         return NULL;
-
 
     add_metric = input_filter(id, prefix, plen, src_prefix, src_plen,
                               neigh->address, neigh->ifp->ifindex);
@@ -888,9 +881,10 @@ update_route(const unsigned char *id,
 
     if(route) {
         struct source *oldsrc;
-        unsigned short oldmetric;
+        unsigned short oldmetric, oldinstalled;
         int lost = 0;
 
+        oldinstalled = route->installed;
         oldsrc = route->src;
         oldmetric = route_metric(route);
 
@@ -912,7 +906,7 @@ update_route(const unsigned char *id,
         }
 
         route->src = retain_source(src);
-        if((feasible || keep_unfeasible) && refmetric < INFINITY)
+        if(refmetric < INFINITY)
             route->time = now.tv_sec;
         route->seqno = seqno;
 
@@ -941,12 +935,14 @@ update_route(const unsigned char *id,
         route->hold_time = hold_time;
 
         route_changed(route, oldsrc, oldmetric);
+        if(!lost) {
+            lost = oldinstalled &&
+                find_installed_route(prefix, plen, src_prefix, src_plen) == NULL;
+        }
         if(lost)
             route_lost(oldsrc, oldmetric);
-
-        if(!feasible)
-            send_unfeasible_request(neigh, route->installed && route_old(route),
-                                    seqno, metric, src);
+        else if(!feasible)
+            send_unfeasible_request(neigh, route_old(route), seqno, metric, src);
         release_source(oldsrc);
     } else {
         struct babel_route *new_route;
@@ -956,8 +952,6 @@ update_route(const unsigned char *id,
             return NULL;
         if(!feasible) {
             send_unfeasible_request(neigh, 0, seqno, metric, src);
-            if(!keep_unfeasible)
-                return NULL;
         }
 
         route = calloc(1, sizeof(struct babel_route));
@@ -1195,7 +1189,7 @@ route_lost(struct source *src, unsigned oldmetric)
            If it was not, we could be dealing with oscillations around
            the value of INFINITY. */
         if(oldmetric <= INFINITY / 2)
-            send_request_resend(NULL, src->prefix, src->plen,
+            send_request_resend(src->prefix, src->plen,
                                 src->src_prefix, src->src_plen,
                                 src->metric >= INFINITY ?
                                 src->seqno : seqno_plus(src->seqno, 1),

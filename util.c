@@ -246,7 +246,7 @@ normalize_prefix(unsigned char *restrict ret,
     return ret;
 }
 
-static const unsigned char v4prefix[16] =
+const unsigned char v4prefix[16] =
     {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 0, 0, 0, 0 };
 
 static const unsigned char llprefix[16] =
@@ -495,9 +495,6 @@ prefix_cmp(const unsigned char *p1, unsigned char plen1,
            const unsigned char *p2, unsigned char plen2)
 {
     int plen = MIN(plen1, plen2);
-
-    if(v4mapped(p1) != v4mapped(p2))
-        return PST_DISJOINT;
 
     if(memcmp(p1, p2, plen / 8) != 0)
         return PST_DISJOINT;
