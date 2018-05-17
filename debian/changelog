@@ -1,3 +1,9 @@
+babeld (1.8.2-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Benda Xu <heroxbd@gentoo.org>  Thu, 17 May 2018 20:27:56 +0900
+
 babeld (1.8.1-1) unstable; urgency=medium
 
   * New upstream release (Closes: #884493).
