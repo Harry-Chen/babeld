@@ -1,4 +1,4 @@
-Format: http://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Packaged-By: Stéphane Glondu <glondu@debian.org>
 Packaged-Date: Thu, 27 Aug 2009 11:38:26 +0200
 Source: http://www.pps.univ-paris-diderot.fr/~jch/software/babel/
