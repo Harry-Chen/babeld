@@ -24,6 +24,8 @@ THE SOFTWARE.
 #include <string.h>
 #include <stdio.h>
 #include <sys/time.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 #include <assert.h>
 
 #ifdef __linux
@@ -469,6 +471,15 @@ parse_filter(int c, gnc_t gnc, void *closure, struct filter **filter_return)
             if(table <= 0 || table > INFINITY)
                 goto error;
             filter->action.table = table;
+        } else if(strcmp(token, "pref-src") == 0) {
+            int af;
+            c = getip(c, &filter->action.pref_src, &af, gnc, closure);
+            if(c < -1)
+                goto error;
+            if(filter->af == AF_UNSPEC)
+                filter->af = af;
+            else if(filter->af != af)
+                goto error;
         } else {
             goto error;
         }
@@ -560,6 +571,12 @@ parse_anonymous_ifconf(int c, gnc_t gnc, void *closure,
             if(c < -1)
                 goto error;
             if_conf->faraway = v;
+        } else if(strcmp(token, "unicast") == 0) {
+            int v;
+            c = getbool(c, &v, gnc, closure);
+            if(c < -1)
+                goto error;
+            if_conf->unicast = v;
         } else if(strcmp(token, "link-quality") == 0) {
             int v;
             c = getbool(c, &v, gnc, closure);
@@ -600,6 +617,12 @@ parse_anonymous_ifconf(int c, gnc_t gnc, void *closure,
             if(c < -1)
                 goto error;
             if_conf->enable_timestamps = v;
+        } else if(strcmp(token, "rfc6126-compatible") == 0) {
+            int v;
+            c = getbool(c, &v, gnc, closure);
+            if(c < -1)
+                goto error;
+            if_conf->rfc6126 = v;
         } else if(strcmp(token, "rtt-decay") == 0) {
             int decay;
             c = getint(c, &decay, gnc, closure);
@@ -634,7 +657,7 @@ parse_anonymous_ifconf(int c, gnc_t gnc, void *closure,
     return c;
 
  error:
-    if(if_conf->ifname)
+    if(if_conf)
         free(if_conf->ifname);
     free(if_conf);
     return -2;
@@ -705,8 +728,10 @@ merge_ifconf(struct interface_conf *dest,
     MERGE(split_horizon);
     MERGE(lq);
     MERGE(faraway);
+    MERGE(unicast);
     MERGE(channel);
     MERGE(enable_timestamps);
+    MERGE(rfc6126);
     MERGE(rtt_decay);
     MERGE(rtt_min);
     MERGE(rtt_max);
@@ -1019,6 +1044,7 @@ parse_config_line(int c, gnc_t gnc, void *closure,
         c = parse_filter(c, gnc, closure, &filter);
         if(c < -1)
             goto fail;
+        add_filter(filter, &install_filters);
     } else if(strcmp(token, "interface") == 0) {
         struct interface_conf *if_conf;
         c = parse_ifconf(c, gnc, closure, &if_conf);
@@ -1320,11 +1346,12 @@ redistribute_filter(const unsigned char *prefix, unsigned short plen,
 int
 install_filter(const unsigned char *prefix, unsigned short plen,
                const unsigned char *src_prefix, unsigned short src_plen,
+               unsigned int ifindex,
                struct filter_result *result)
 {
     int res;
     res = do_filter(install_filters, NULL, prefix, plen,
-                    src_prefix, src_plen, NULL, 0, 0, result);
+                    src_prefix, src_plen, NULL, ifindex, 0, result);
     if(res < 0)
         res = INFINITY;
     return res;
