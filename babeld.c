@@ -572,6 +572,8 @@ main(int argc, char **argv)
         gettime(&now);
         send_hello(ifp);
         send_wildcard_retraction(ifp);
+        flushupdates(ifp);
+        flushbuf(&ifp->buf, ifp);
     }
 
     FOR_ALL_INTERFACES(ifp) {
@@ -582,8 +584,9 @@ main(int argc, char **argv)
         send_hello(ifp);
         send_wildcard_retraction(ifp);
         send_self_update(ifp);
+        send_multicast_request(ifp, NULL, 0, NULL, 0);
         flushupdates(ifp);
-        flushbuf(ifp);
+        flushbuf(&ifp->buf, ifp);
     }
 
     debugf("Entering main loop.\n");
@@ -591,6 +594,7 @@ main(int argc, char **argv)
     while(1) {
         struct timeval tv;
         fd_set readfds;
+        struct neighbour *neigh;
 
         gettime(&now);
 
@@ -603,12 +607,14 @@ main(int argc, char **argv)
         FOR_ALL_INTERFACES(ifp) {
             if(!if_up(ifp))
                 continue;
-            timeval_min(&tv, &ifp->flush_timeout);
+            timeval_min(&tv, &ifp->buf.timeout);
             timeval_min(&tv, &ifp->hello_timeout);
             timeval_min(&tv, &ifp->update_timeout);
             timeval_min(&tv, &ifp->update_flush_timeout);
         }
-        timeval_min(&tv, &unicast_flush_timeout);
+        FOR_ALL_NEIGHBOURS(neigh) {
+            timeval_min(&tv, &neigh->buf.timeout);
+        }
         FD_ZERO(&readfds);
         if(timeval_compare(&tv, &now) > 0) {
             int maxfd = 0;
@@ -770,17 +776,22 @@ main(int argc, char **argv)
                 do_resend();
         }
 
-        if(unicast_flush_timeout.tv_sec != 0) {
-            if(timeval_compare(&now, &unicast_flush_timeout) >= 0)
-                flush_unicast(1);
-        }
-
         FOR_ALL_INTERFACES(ifp) {
             if(!if_up(ifp))
                 continue;
-            if(ifp->flush_timeout.tv_sec != 0) {
-                if(timeval_compare(&now, &ifp->flush_timeout) >= 0)
-                    flushbuf(ifp);
+            if(ifp->buf.timeout.tv_sec != 0) {
+                if(timeval_compare(&now, &ifp->buf.timeout) >= 0) {
+                    flushupdates(ifp);
+                    flushbuf(&ifp->buf, ifp);
+                }
+            }
+        }
+
+        FOR_ALL_NEIGHBOURS(neigh) {
+            if(neigh->buf.timeout.tv_sec != 0) {
+                if(timeval_compare(&now, &neigh->buf.timeout) >= 0) {
+                    flushbuf(&neigh->buf, neigh->ifp);
+                }
             }
         }
 
@@ -794,7 +805,7 @@ main(int argc, char **argv)
     usleep(roughly(10000));
     gettime(&now);
 
-    /* We need to flush so interface_up won't try to reinstall. */
+    /* We need to flush so interface_updown won't try to reinstall. */
     flush_all_routes();
 
     FOR_ALL_INTERFACES(ifp) {
@@ -803,8 +814,8 @@ main(int argc, char **argv)
         send_wildcard_retraction(ifp);
         /* Make sure that we expire quickly from our neighbours'
            association caches. */
-        send_hello_noupdate(ifp, 10);
-        flushbuf(ifp);
+        send_multicast_hello(ifp, 10, 1);
+        flushbuf(&ifp->buf, ifp);
         usleep(roughly(1000));
         gettime(&now);
     }
@@ -813,11 +824,11 @@ main(int argc, char **argv)
             continue;
         /* Make sure they got it. */
         send_wildcard_retraction(ifp);
-        send_hello_noupdate(ifp, 1);
-        flushbuf(ifp);
+        send_multicast_hello(ifp, 1, 1);
+        flushbuf(&ifp->buf, ifp);
         usleep(roughly(10000));
         gettime(&now);
-        interface_up(ifp, 0);
+        interface_updown(ifp, 0);
     }
     release_tables();
     kernel_setup_socket(0);
@@ -874,7 +885,7 @@ main(int argc, char **argv)
     FOR_ALL_INTERFACES(ifp) {
         if(!if_up(ifp))
             continue;
-        interface_up(ifp, 0);
+        interface_updown(ifp, 0);
     }
     kernel_setup_socket(0);
     kernel_setup(0);
@@ -1113,7 +1124,7 @@ dump_tables(FILE *out)
 
     FOR_ALL_NEIGHBOURS(neigh) {
         fprintf(out, "Neighbour %s dev %s reach %04x ureach %04x "
-                "rxcost %d txcost %d rtt %s rttcost %d chan %d%s.\n",
+                "rxcost %u txcost %d rtt %s rttcost %u chan %d%s.\n",
                 format_address(neigh->address),
                 neigh->ifp->name,
                 neigh->hello.reach,
