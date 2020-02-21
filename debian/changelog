@@ -1,8 +1,9 @@
-babeld (1.9.1-2) unstable; urgency=medium
+babeld (1.9.1-2) UNRELEASED; urgency=medium
 
-  * d/copyright: Use https protocol in Format field
+  [ Ondřej Nový ]
+  * d/copyright: Use https protocol in Format field.
 
- -- Ondřej Nový <onovy@debian.org>  Mon, 01 Oct 2018 10:06:16 +0200
+ -- Benda Xu <heroxbd@gentoo.org>  Fri, 21 Feb 2020 22:28:44 +0800
 
 babeld (1.9.1-1) unstable; urgency=medium
 
