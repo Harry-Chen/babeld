@@ -5,7 +5,9 @@ DESTDIR := debian/babeld
 %:
 	dh $@
 
-.PHONY: override_dh_auto_install
+export BLAKE_SRCS= BLAKE_CFLAGS=
+export LDLIBS=-lb2
+
 override_dh_auto_install:
-	$(MAKE) install TARGET=$(DESTDIR) PREFIX=/usr
+	dh_auto_install -- TARGET=$(DESTDIR) PREFIX=/usr
 	mv $(DESTDIR)/usr/bin $(DESTDIR)/usr/sbin
