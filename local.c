@@ -26,6 +26,8 @@ THE SOFTWARE.
 #include <unistd.h>
 #include <errno.h>
 #include <sys/time.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 #include <arpa/inet.h>
 
 #include "babeld.h"
@@ -78,7 +80,7 @@ write_timeout(int fd, const void *buf, int len)
     }
 }
 
-static const char *
+const char *
 local_kind(int kind)
 {
     switch(kind) {
@@ -300,7 +302,7 @@ local_notify_all_1(struct local_socket *s)
         xroute_stream_done(xroutes);
     }
 
-    routes = route_stream(ROUTE_ALL);
+    routes = route_stream(0);
     if(routes) {
         while(1) {
             struct babel_route *route = route_stream_next(routes);

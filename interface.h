@@ -35,6 +35,13 @@ struct buffered_update {
 #define IF_TYPE_TUNNEL 3
 
 /* If you modify this structure, also modify the merge_ifconf function. */
+struct key {
+    char *id;
+    int type;
+    int len;
+    unsigned char *value;
+    unsigned short ref_count;
+};
 
 struct interface_conf {
     char *ifname;
@@ -46,13 +53,15 @@ struct interface_conf {
     char lq;
     char faraway;
     char unicast;
+    char enable_timestamps;
+    char rfc6126;
+    char accept_bad_signatures;
     int channel;
-    int enable_timestamps;
-    int rfc6126;
     unsigned int rtt_decay;
     unsigned int rtt_min;
     unsigned int rtt_max;
     unsigned int max_rtt_penalty;
+    struct key *key;
     struct interface_conf *next;
 };
 
@@ -76,6 +85,8 @@ struct interface_conf {
 #define IF_TIMESTAMPS (1 << 6)
 /* Remain compatible with RFC 6126. */
 #define IF_RFC6126 (1 << 7)
+/* Accept packets even if incorrectly signed. */
+#define IF_ACCEPT_BAD_SIGNATURES (1 << 8)
 /* Use Babel over DTLS on this interface. */
 #define IF_DTLS (1 << 9)
 
@@ -101,6 +112,8 @@ struct buffered {
        (-1) if there is none. */
     int hello;
 };
+
+#define INDEX_LEN 8
 
 struct interface {
     struct interface *next;
@@ -131,6 +144,9 @@ struct interface {
     unsigned int rtt_min;
     unsigned int rtt_max;
     unsigned int max_rtt_penalty;
+    struct key *key;
+    unsigned int pc;
+    unsigned char index[INDEX_LEN];
 };
 
 #define IF_CONF(_ifp, _field) \

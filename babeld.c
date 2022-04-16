@@ -52,7 +52,6 @@ THE SOFTWARE.
 #include "resend.h"
 #include "configuration.h"
 #include "local.h"
-#include "rule.h"
 #include "version.h"
 
 struct timeval now;
@@ -87,7 +86,6 @@ unsigned char protocol_group[16];
 int protocol_socket = -1;
 int kernel_socket = -1;
 static int kernel_routes_changed = 0;
-static int kernel_rules_changed = 0;
 static int kernel_link_changed = 0;
 static int kernel_addr_changed = 0;
 
@@ -124,22 +122,6 @@ kernel_link_notify(struct kernel_link *link, void *closure)
         }
     }
     return 0;
-}
-
-static int
-kernel_rule_notify(struct kernel_rule *rule, void *closure)
-{
-    int i;
-    if(martian_prefix(rule->src, rule->src_plen))
-        return 0;
-
-    i = rule->priority - src_table_prio;
-
-    if(i < 0 || SRC_TABLE_NUM <= i)
-        return 0;
-
-    kernel_rules_changed = 1;
-    return -1;
 }
 
 int
@@ -548,12 +530,8 @@ main(int argc, char **argv)
     rc = check_xroutes(0);
     if(rc < 0)
         fprintf(stderr, "Warning: couldn't check exported routes.\n");
-    rc = check_rules();
-    if(rc < 0)
-        fprintf(stderr, "Warning: couldn't check rules.\n");
 
     kernel_routes_changed = 0;
-    kernel_rules_changed = 0;
     kernel_link_changed = 0;
     kernel_addr_changed = 0;
     kernel_dump_time = now.tv_sec + roughly(30);
@@ -656,14 +634,14 @@ main(int argc, char **argv)
             filter.route = kernel_route_notify;
             filter.addr = kernel_addr_notify;
             filter.link = kernel_link_notify;
-            filter.rule = kernel_rule_notify;
             kernel_callback(&filter);
         }
 
         if(FD_ISSET(protocol_socket, &readfds)) {
+            unsigned char to[16];
             rc = babel_recv(protocol_socket,
                             receive_buffer, receive_buffer_size,
-                            (struct sockaddr*)&sin6, sizeof(sin6));
+                            (struct sockaddr*)&sin6, sizeof(sin6), to);
             if(rc < 0) {
                 if(errno != EAGAIN && errno != EINTR) {
                     perror("recv");
@@ -675,7 +653,7 @@ main(int argc, char **argv)
                         continue;
                     if(ifp->ifindex == sin6.sin6_scope_id) {
                         parse_packet((unsigned char*)&sin6.sin6_addr, ifp,
-                                     receive_buffer, rc);
+                                     receive_buffer, rc, to);
                         VALGRIND_MAKE_MEM_UNDEFINED(receive_buffer,
                                                     receive_buffer_size);
                         break;
@@ -721,15 +699,11 @@ main(int argc, char **argv)
         }
 
         if(kernel_routes_changed || kernel_addr_changed ||
-           kernel_rules_changed || now.tv_sec >= kernel_dump_time) {
+           now.tv_sec >= kernel_dump_time) {
             rc = check_xroutes(1);
             if(rc < 0)
                 fprintf(stderr, "Warning: couldn't check exported routes.\n");
-            rc = check_rules();
-            if(rc < 0)
-                fprintf(stderr, "Warning: couldn't check rules.\n");
-            kernel_routes_changed = kernel_rules_changed =
-                kernel_addr_changed = 0;
+            kernel_routes_changed = kernel_addr_changed = 0;
             if(kernel_socket >= 0)
                 kernel_dump_time = now.tv_sec + roughly(300);
             else
@@ -830,7 +804,6 @@ main(int argc, char **argv)
         gettime(&now);
         interface_updown(ifp, 0);
     }
-    release_tables();
     kernel_setup_socket(0);
     kernel_setup(0);
 
@@ -873,7 +846,7 @@ main(int argc, char **argv)
             "               "
             "[-g port] [-G port] [-k metric] [-A metric] [-s] [-l] [-w] [-r]\n"
             "               "
-            "[-u] [-t table] [-T table] [-c file] [-C statement]\n"
+            "[-t table] [-T table] [-c file] [-C statement]\n"
             "               "
             "[-d level] [-D] [-L logfile] [-I pidfile]\n"
             "               "
@@ -1081,12 +1054,10 @@ dump_route(FILE *out, struct babel_route *route)
         snprintf(channels + j, 100 - j, ")");
     }
 
-    fprintf(out, "%s%s%s metric %d (%d) refmetric %d id %s "
+    fprintf(out, "%s from %s metric %d (%d) refmetric %d id %s "
             "seqno %d%s age %d via %s neigh %s%s%s%s\n",
             format_prefix(route->src->prefix, route->src->plen),
-            route->src->src_plen > 0 ? " from " : "",
-            route->src->src_plen > 0 ?
-            format_prefix(route->src->src_prefix, route->src->src_plen) : "",
+            format_prefix(route->src->src_prefix, route->src->src_plen),
             route_metric(route), route_smoothed_metric(route), route->refmetric,
             format_eui64(route->src->id),
             (int)route->seqno,
@@ -1103,11 +1074,9 @@ dump_route(FILE *out, struct babel_route *route)
 static void
 dump_xroute(FILE *out, struct xroute *xroute)
 {
-    fprintf(out, "%s%s%s metric %d (exported)\n",
+    fprintf(out, "%s from %s metric %d (exported)\n",
             format_prefix(xroute->prefix, xroute->plen),
-            xroute->src_plen > 0 ? " from " : "",
-            xroute->src_plen > 0 ?
-            format_prefix(xroute->src_prefix, xroute->src_plen) : "",
+            format_prefix(xroute->src_prefix, xroute->src_plen),
             xroute->metric);
 }
 
@@ -1147,7 +1116,7 @@ dump_tables(FILE *out)
         xroute_stream_done(xroutes);
     }
 
-    routes = route_stream(ROUTE_ALL);
+    routes = route_stream(0);
     if(routes) {
         while(1) {
             struct babel_route *route = route_stream_next(routes);

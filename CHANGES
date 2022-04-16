@@ -1,3 +1,28 @@
+30 March 2022: babeld-1.11
+
+  * Implemented MAC authentication (RFC 8967).  Thanks to Clara Dô,
+    Weronika Kołodziejak and Antonin Décimo.
+  * Changed the interface of the add_filter function in order to simplify
+    integration in OpenWRT.  Thanks to Nick Hainke.
+
+25 April 2021: babeld-1.10
+
+  * Removed the disambiguation code: source-specific routing is no longer
+    supported for IPv4, and for IPv6 only on Linux 3.11 or later.
+  * Fixed an issue handling of retractions with no next hop, which caused
+    interoperability problems with BIRD.  Thanks to Fabian Bläse.
+  * If skip-kernel-setup is set, we no longer disable the rp_filter, which
+    makes babeld work in containers.  Thanks to Martin Weinelt.
+
+21 April 2020: babeld-1.9.2
+
+  * Fixed two issues that could cause IPv4 routes to be represented
+    incorrectly, with a range of confusing symptoms.  Thanks to
+    Fabian Bläse.
+  * Fixed incorrect parsing of TLVs with an unknown Address Encoding.
+    Thanks to Théophile Bastian.
+  * Fixed access to mis-aligned data structure.  Thanks to Antonin Décimo.
+
 20 August 2019: babeld-1.9.1
 
   * Fixed a crash that could happen when unicast and RTT estimation are

@@ -27,6 +27,7 @@ THE SOFTWARE.
 #include <sys/time.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <time.h>
 
 #include "babeld.h"
 #include "util.h"
@@ -40,6 +41,7 @@ THE SOFTWARE.
 #include "resend.h"
 #include "message.h"
 #include "configuration.h"
+#include "hmac.h"
 
 unsigned char packet_header[4] = {42, 2};
 
@@ -48,9 +50,14 @@ int split_horizon = 1;
 unsigned short myseqno = 0;
 struct timeval seqno_time = {0, 0};
 
-extern const unsigned char v4prefix[16];
-
 #define MAX_CHANNEL_HOPS 20
+
+/* Checks whether an AE exists or must be silently ignored */
+static int
+known_ae(int ae)
+{
+    return ae <= 3;
+}
 
 /* Parse a network prefix, encoded in the somewhat baroque compressed
    representation used by Babel.  Return the number of bytes parsed. */
@@ -122,6 +129,7 @@ parse_update_subtlv(struct interface *ifp, int metric, int ae,
 {
     int type, len, i = 0;
     int channels_len;
+    int have_src_prefix = 0;
 
     /* This will be overwritten if there's a DIVERSITY_HOPS sub-TLV. */
     if(*channels_len_return < 1 || (ifp->flags & IF_FARAWAY)) {
@@ -136,8 +144,6 @@ parse_update_subtlv(struct interface *ifp, int metric, int ae,
             channels_len = 1;
         }
     }
-
-    *src_plen = 0;
 
     while(i < alen) {
         type = a[i];
@@ -163,15 +169,17 @@ parse_update_subtlv(struct interface *ifp, int metric, int ae,
                 goto fail;
             if(a[i + 2] == 0)   /* source prefix cannot be default */
                 goto fail;
-            if(*src_plen != 0)  /* source prefix can only be specified once */
+            if(have_src_prefix != 0) /* source prefix can only appear once */
                 goto fail;
-            *src_plen = a[i + 2];
-            rc = network_prefix(ae, *src_plen, 0, a + i + 3, NULL,
+            rc = network_prefix(ae, a[i + 2], 0, a + i + 3, NULL,
                                 len - 1, src_prefix);
             if(rc < 0)
                 goto fail;
             if(ae == 1)
-                (*src_plen) += 96;
+                *src_plen = a[i + 2] + 96;
+            else
+                *src_plen = a[i + 2];
+            have_src_prefix = 1;
         } else {
             debugf("Received unknown%s Update sub-TLV %d.\n",
                    (type & 0x80) != 0 ? " mandatory" : "", type);
@@ -248,7 +256,7 @@ parse_ihu_subtlv(const unsigned char *a, int alen,
 {
     int type, len, i = 0;
     int have_timestamp = 0;
-    unsigned int timestamp1, timestamp2;
+    unsigned int timestamp1 = 0, timestamp2 = 0;
 
     while(i < alen) {
         type = a[0];
@@ -293,9 +301,8 @@ parse_ihu_subtlv(const unsigned char *a, int alen,
         *timestamp1_return = timestamp1;
         *timestamp2_return = timestamp2;
     }
-    if(have_timestamp_return) {
+    if(have_timestamp_return)
         *have_timestamp_return = have_timestamp;
-    }
     return 1;
 }
 
@@ -304,8 +311,7 @@ parse_request_subtlv(int ae, const unsigned char *a, int alen,
                      unsigned char *src_prefix, unsigned char *src_plen)
 {
     int type, len, i = 0;
-
-    *src_plen = 0;
+    int have_src_prefix = 0;
 
     while(i < alen) {
         type = a[0];
@@ -329,15 +335,17 @@ parse_request_subtlv(int ae, const unsigned char *a, int alen,
                 goto fail;
             if(a[i + 2] == 0)
                 goto fail;
-            if(*src_plen != 0)
+            if(have_src_prefix != 0)
                 goto fail;
-            *src_plen = a[i + 2];
-            rc = network_prefix(ae, *src_plen, 0, a + i + 3, NULL,
+            rc = network_prefix(ae, a[i + 2], 0, a + i + 3, NULL,
                                 len - 1, src_prefix);
             if(rc < 0)
                 goto fail;
             if(ae == 1)
-                (*src_plen) += 96;
+                *src_plen = a[i + 2] + 96;
+            else
+                *src_plen = a[i + 2];
+            have_src_prefix = 1;
         } else {
             debugf("Received unknown%s Route Request sub-TLV %d.\n",
                    ((type & 0x80) != 0) ? " mandatory" : "", type);
@@ -439,15 +447,149 @@ network_address(int ae, const unsigned char *a, unsigned int len,
     return network_prefix(ae, -1, 0, a, NULL, len, a_r);
 }
 
+static struct neighbour *
+preparse_packet(const unsigned char *from, struct interface *ifp,
+                const unsigned char *body, int bodylen,
+                const unsigned char *to)
+{
+    int rc, i;
+    struct neighbour *neigh = NULL;
+    int challenge_success = 0, accept_packet = 0;
+    const unsigned char *pc = NULL, *index = NULL, *nonce = NULL;
+    int index_len, nonce_len;
+
+    i = 0;
+    while(i < bodylen) {
+        const unsigned char *message = body + 4 + i;
+        unsigned char len, type = message[0];
+        if(type == MESSAGE_PAD1) {
+            i++;
+            continue;
+        }
+        if(i + 1 > bodylen) {
+            fprintf(stderr, "Received truncated message.\n");
+            break;
+        }
+        len = message[1];
+        if(i + len + 2 > bodylen) {
+            fprintf(stderr, "Received truncated message.\n");
+            break;
+        }
+        if(type == MESSAGE_PC) {
+            unsigned int pcnat;
+
+            if(index != NULL)
+                goto done;
+
+            if(len < 4) {
+                fprintf(stderr, "Received truncated PC TLV.\n");
+                break;
+            }
+            if(len > 4 + 32) {
+                fprintf(stderr, "Overlong PC TLV.\n");
+                break;
+            }
+
+            pc = message + 2;
+            index = message + 6;
+            index_len = len - 4;
+
+            memcpy(&pcnat, pc, 4);
+            debugf("Received PC %u from %s.\n",
+                   ntohl(pcnat), format_address(from));
+        } else if(type == MESSAGE_CHALLENGE_REQUEST) {
+            if(IN6_IS_ADDR_MULTICAST(to))
+                goto done;
+
+            if(len > 192) {
+                fprintf(stderr, "Overlong challenge request TLV.\n");
+                break;
+            }
+
+            nonce = message + 2;
+            nonce_len = len;
+
+            debugf("Received challenge request from %s.\n",
+                   format_address(from));
+        } else if(type == MESSAGE_CHALLENGE_REPLY) {
+            if(len > 192) {
+                fprintf(stderr, "Overlong challenge reply TLV.\n");
+                break;
+            }
+
+            debugf("Received challenge reply from %s.\n",
+                   format_address(from));
+
+            neigh = neigh != NULL ? neigh : find_neighbour(from, ifp);
+            if(neigh == NULL)
+                goto done;
+
+            gettime(&now);
+            if(timeval_compare(&now, &neigh->challenge_deadline) > 0) {
+                debugf("No pending challenge.\n");
+                goto done;
+            }
+
+            if(len == sizeof(neigh->nonce) &&
+               memcmp(neigh->nonce, message + 2, len) == 0) {
+                const struct timeval zero = {0, 0};
+                challenge_success = 1;
+                neigh->challenge_deadline = zero;
+                debugf("Challenge succeeded!\n");
+            } else {
+                debugf("Challenge failed.\n");
+            }
+        }
+    done:
+        i += len + 2;
+    }
+
+    if(index == NULL) {
+        debugf("No PC in packet.\n");
+    } else if(challenge_success) {
+        neigh->index_len = index_len;
+        memcpy(neigh->index, index, index_len);
+        memcpy(neigh->pc, pc, 4);
+        accept_packet = 1;
+    } else {
+        neigh = neigh != NULL ? neigh : find_neighbour(from, ifp);
+        if(neigh == NULL)
+            return NULL;
+        if(neigh->index_len == -1 ||
+           neigh->index_len != index_len ||
+           memcmp(index, neigh->index, index_len) != 0) {
+            rc = send_challenge_request(neigh);
+            if(rc < -1)
+                fputs("Could not send challenge request.\n", stderr);
+        } else if(memcmp(pc, neigh->pc, 4) <= 0) {
+            debugf("Out of order PC.\n");
+            nonce = NULL;
+        } else {
+            memcpy(neigh->pc, pc, 4);
+            accept_packet = 1;
+        }
+    }
+
+    if(nonce != NULL) { /* a challenge request was received */
+        neigh = neigh != NULL ? neigh : find_neighbour(from, ifp);
+        if(neigh == NULL)
+            return NULL;
+        send_challenge_reply(neigh, nonce, nonce_len);
+    }
+    debugf("accept_packet: %d, neigh: %p.\n", accept_packet, (void*)neigh);
+    return accept_packet ? neigh : NULL;
+}
+
 void
 parse_packet(const unsigned char *from, struct interface *ifp,
-             const unsigned char *packet, int packetlen)
+             const unsigned char *packet, int packetlen,
+             const unsigned char *to)
 {
     int i;
     const unsigned char *message;
     unsigned char type, len;
     int bodylen;
-    struct neighbour *neigh;
+    struct neighbour *neigh = NULL;
     int have_router_id = 0, have_v4_prefix = 0, have_v6_prefix = 0,
         have_v4_nh = 0, have_v6_nh = 0;
     unsigned char router_id[8], v4_prefix[16], v6_prefix[16],
@@ -488,7 +630,26 @@ parse_packet(const unsigned char *from, struct interface *ifp,
         bodylen = packetlen - 4;
     }
 
-    neigh = find_neighbour(from, ifp);
+    if(ifp->key != NULL) {
+        int rc = check_hmac(packet, packetlen, bodylen, from, to, ifp);
+        if(rc <= 0) {
+            if(rc < 0)
+                debugf("Received unsigned packet.\n");
+            else
+                debugf("Received packet with bad signature.\n");
+            if(!(ifp->flags & IF_ACCEPT_BAD_SIGNATURES))
+                return;
+        } else {
+            neigh = preparse_packet(from, ifp, packet, bodylen, to);
+            if(neigh == NULL) {
+                debugf("Received packet with wrong PC.\n");
+                return;
+            }
+        }
+    }
+
+    if(neigh == NULL)
+        neigh = find_neighbour(from, ifp);
     if(neigh == NULL) {
         fprintf(stderr, "Couldn't allocate neighbour.\n");
         return;
@@ -571,6 +732,11 @@ parse_packet(const unsigned char *from, struct interface *ifp,
             unsigned char address[16];
             int rc;
             if(len < 6) goto fail;
+            if(!known_ae(message[2])) {
+                debugf("Received IHU with unknown AE %d. Ignoring.\n",
+                       message[2]);
+                goto done;
+            }
             DO_NTOHS(txcost, message + 4);
             DO_NTOHS(interval, message + 6);
             rc = network_address(message[2], message + 8, len - 6, address);
@@ -616,8 +782,16 @@ parse_packet(const unsigned char *from, struct interface *ifp,
                 have_v6_nh = 0;
                 goto fail;
             }
-            rc = network_address(message[2], message + 4, len - 2,
-                                 nh);
+            rc = network_address(message[2], message + 4, len - 2, nh);
+            if(!known_ae(message[2])) {
+                debugf("Received NH with unknown AE %d. Ignoring.\n",
+                       message[2]);
+                goto done;
+            }
+            if(message[2] == 0) {
+                debugf("Received NH with bad AE 0. Error.\n");
+                goto fail;
+            }
             if(rc < 0) {
                 have_v4_nh = 0;
                 have_v6_nh = 0;
@@ -647,6 +821,11 @@ parse_packet(const unsigned char *from, struct interface *ifp,
                 if(len < 2 || message[3] & 0x80)
                     have_v4_prefix = have_v6_prefix = 0;
                 goto fail;
+            }
+            if(!known_ae(message[2])) {
+                debugf("Received update with unknown AE %d. Ignoring.\n",
+                       message[2]);
+                goto done;
             }
             DO_NTOHS(interval, message + 6);
             DO_NTOHS(seqno, message + 8);
@@ -693,7 +872,7 @@ parse_packet(const unsigned char *from, struct interface *ifp,
                 }
                 have_router_id = 1;
             }
-            if(!have_router_id && message[2] != 0) {
+            if(metric < INFINITY && !have_router_id && message[2] != 0) {
                 fprintf(stderr, "Received prefix with no router id.\n");
                 goto fail;
             }
@@ -703,9 +882,13 @@ parse_packet(const unsigned char *from, struct interface *ifp,
                    format_prefix(prefix, plen),
                    format_address(from), ifp->name);
             if(message[2] == 1) {
-                if(!have_v4_nh)
-                    goto fail;
-                nh = v4_nh;
+                if(have_v4_nh) {
+                    nh = v4_nh;
+                } else {
+                    if(metric < INFINITY)
+                        goto fail;
+                    nh = NULL;
+                }
             } else if(have_v6_nh) {
                 nh = v6_nh;
             } else {
@@ -748,13 +931,19 @@ parse_packet(const unsigned char *from, struct interface *ifp,
                     goto done;
             }
 
-            update_route(router_id, prefix, plen, src_prefix, src_plen, seqno,
+            update_route(have_router_id ? router_id : NULL,
+                         prefix, plen, src_prefix, src_plen, seqno,
                          metric, interval, neigh, nh,
                          channels, channels_len);
         } else if(type == MESSAGE_REQUEST) {
             unsigned char prefix[16], src_prefix[16], plen, src_plen;
             int rc, is_ss;
             if(len < 2) goto fail;
+            if(!known_ae(message[2])) {
+                debugf("Received request with unknown AE %d. Ignoring.\n",
+                       message[2]);
+                goto done;
+            }
             rc = network_prefix(message[2], message[3], 0,
                                 message + 4, NULL, len - 2, prefix);
             if(rc < 0) goto fail;
@@ -804,6 +993,11 @@ parse_packet(const unsigned char *from, struct interface *ifp,
             unsigned short seqno;
             int rc, is_ss;
             if(len < 14) goto fail;
+            if(!known_ae(message[2])) {
+                debugf("Received mh_request with unknown AE %d. Ignoring.\n",
+                       message[2]);
+                goto done;
+            }
             DO_NTOHS(seqno, message + 4);
             rc = network_prefix(message[2], message[3], 0,
                                 message + 16, NULL, len - 14, prefix);
@@ -832,6 +1026,10 @@ parse_packet(const unsigned char *from, struct interface *ifp,
                    format_eui64(message + 8), seqno);
             handle_request(neigh, prefix, plen, src_prefix, src_plen,
                            message[6], seqno, message + 8);
+        } else if(type == MESSAGE_PC ||
+                  type == MESSAGE_CHALLENGE_REQUEST ||
+                  type == MESSAGE_CHALLENGE_REPLY) {
+            /* We're dealing with these in preparse_packet. */
         } else {
             debugf("Received unknown packet type %d from %s on %s.\n",
                    type, format_address(from), ifp->name);
@@ -913,16 +1111,26 @@ void
 flushbuf(struct buffered *buf, struct interface *ifp)
 {
     int rc;
+    int end = buf->len;
 
     assert(buf->len <= buf->size);
 
     if(buf->len > 0) {
+        if(ifp->key != NULL && ifp->key->type != AUTH_TYPE_NONE)
+            send_pc(buf, ifp);
         debugf("  (flushing %d buffered bytes)\n", buf->len);
         DO_HTONS(packet_header + 2, buf->len);
         fill_rtt_message(buf, ifp);
+        if(ifp->key != NULL && ifp->key->type != AUTH_TYPE_NONE) {
+            end = add_hmac(buf, ifp, packet_header);
+            if(end < 0) {
+                fprintf(stderr, "Couldn't add HMAC.\n");
+                return;
+            }
+        }
         rc = babel_send(protocol_socket,
                         packet_header, sizeof(packet_header),
-                        buf->buf, buf->len,
+                        buf->buf, end,
                         (struct sockaddr*)&buf->sin6,
                         sizeof(buf->sin6));
         if(rc < 0)
@@ -962,6 +1170,8 @@ schedule_flush_now(struct buffered *buf)
 static void
 ensure_space(struct buffered *buf, struct interface *ifp, int space)
 {
+    if(ifp->key != NULL)
+        space += MAX_HMAC_SPACE + 6 + INDEX_LEN;
     if(buf->size - buf->len < space)
         flushbuf(buf, ifp);
 }
@@ -969,7 +1179,10 @@ ensure_space(struct buffered *buf, struct interface *ifp, int space)
 static void
 start_message(struct buffered *buf, struct interface *ifp, int type, int len)
 {
-    if(buf->size - buf->len < len + 2)
+    int space = ifp->key == NULL
+        ? len + 2
+        : len + 2 + MAX_HMAC_SPACE + 6 + INDEX_LEN;
+    if(buf->size - buf->len < space)
         flushbuf(buf, ifp);
     buf->buf[buf->len++] = type;
     buf->buf[buf->len++] = len;
@@ -1012,6 +1225,28 @@ accumulate_bytes(struct buffered *buf,
     buf->len += len;
 }
 
+int
+send_pc(struct buffered *buf, struct interface *ifp)
+{
+    int space = MAX_HMAC_SPACE + 6 + INDEX_LEN;
+    if(buf->size - buf->len < space) {
+        fputs("send_pc: no space left to accumulate pc.\n", stderr);
+        return -1;
+    }
+    if(ifp->pc == 0) {
+        int rc;
+        rc = read_random_bytes(ifp->index, INDEX_LEN);
+        if(rc < INDEX_LEN)
+            return -1;
+    }
+    accumulate_byte(buf, MESSAGE_PC);
+    accumulate_byte(buf, 4 + INDEX_LEN);
+    accumulate_int(buf, ifp->pc);
+    accumulate_bytes(buf, ifp->index, INDEX_LEN);
+    ifp->pc++;
+    return 0;
+}
+
 void
 send_ack(struct neighbour *neigh, unsigned short nonce, unsigned short interval)
 {
@@ -1022,6 +1257,51 @@ send_ack(struct neighbour *neigh, unsigned short nonce, unsigned short interval)
     end_message(&neigh->buf, MESSAGE_ACK, 2);
     /* Roughly yields a value no larger than 3/2, so this meets the deadline */
     schedule_flush_ms(&neigh->buf, roughly(interval * 6));
+}
+
+int
+send_challenge_request(struct neighbour *neigh)
+{
+    int rc;
+
+    gettime(&now);
+    if(timeval_compare(&now, &neigh->challenge_request_limitation) <= 0)
+        return -1;
+
+    debugf("Sending challenge request to %s on %s.\n",
+           format_address(neigh->address), neigh->ifp->name);
+    rc = read_random_bytes(neigh->nonce, NONCE_LEN);
+    if(rc < NONCE_LEN) {
+        perror("read_random_bytes");
+        return -2;
+    }
+    start_message(&neigh->buf, neigh->ifp, MESSAGE_CHALLENGE_REQUEST, NONCE_LEN);
+    accumulate_bytes(&neigh->buf, neigh->nonce, NONCE_LEN);
+    end_message(&neigh->buf, MESSAGE_CHALLENGE_REQUEST, NONCE_LEN);
+    gettime(&now);
+    timeval_add_msec(&neigh->challenge_deadline, &now, 30000);
+    timeval_add_msec(&neigh->challenge_request_limitation, &now, 300);
+    schedule_flush_now(&neigh->buf);
+    return 0;
+}
+
+int
+send_challenge_reply(struct neighbour *neigh, const unsigned char *crypto_nonce,
+                     int len)
+{
+    gettime(&now);
+    if(timeval_compare(&now, &neigh->challenge_reply_limitation) <= 0)
+        return -1;
+
+    debugf("Sending challenge reply to %s on %s.\n",
+           format_address(neigh->address), neigh->ifp->name);
+    start_message(&neigh->buf, neigh->ifp, MESSAGE_CHALLENGE_REPLY, len);
+    accumulate_bytes(&neigh->buf, crypto_nonce, len);
+    end_message(&neigh->buf, MESSAGE_CHALLENGE_REPLY, len);
+    gettime(&now);
+    timeval_add_msec(&neigh->challenge_reply_limitation, &now, 300);
+    schedule_flush_now(&neigh->buf);
+    return 0;
 }
 
 static void
@@ -1215,7 +1495,8 @@ really_buffer_update(struct buffered *buf, struct interface *ifp,
     if(channels_size > 0) {
         accumulate_byte(buf, 2);
         accumulate_byte(buf, channels_len);
-        accumulate_bytes(buf, channels, channels_len);
+        if(channels_len > 0)
+            accumulate_bytes(buf, channels, channels_len);
     }
     end_message(buf, MESSAGE_UPDATE, len);
     if(flags & 0x80) {
@@ -1390,9 +1671,9 @@ flushupdates(struct interface *ifp)
                     continue;
 
                 if(route_ifp->channel == IF_CHANNEL_NONINTERFERING) {
-                    memcpy(channels, route->channels,
-                           MIN(route->channels_len, MAX_CHANNEL_HOPS));
                     chlen = MIN(route->channels_len, MAX_CHANNEL_HOPS);
+                    if(chlen > 0)
+                        memcpy(channels, route->channels, chlen);
                 } else {
                     if(route_ifp->channel == IF_CHANNEL_UNKNOWN)
                         channels[0] = IF_CHANNEL_INTERFERING;
@@ -1532,7 +1813,7 @@ send_update(struct interface *ifp, int urgent,
         struct route_stream *routes;
         send_self_update(ifp);
         debugf("Sending update to %s for any.\n", ifp->name);
-        routes = route_stream(ROUTE_INSTALLED);
+        routes = route_stream(1);
         if(routes) {
             while(1) {
                 int is_ss;
@@ -1702,7 +1983,6 @@ send_ihu(struct neighbour *neigh, struct interface *ifp)
         }
         return;
     }
-
 
     if(ifp && neigh->ifp != ifp)
         return;
@@ -1948,6 +2228,7 @@ send_multicast_multihop_request(struct interface *ifp,
                               src_prefix, src_plen,
                               seqno, id, hop_count);
     }
+
 }
 
 void
@@ -1984,11 +2265,11 @@ send_request_resend(const unsigned char *prefix, unsigned char plen,
     } else {
         struct interface *ifp;
         FOR_ALL_INTERFACES(ifp) {
-	    if(!if_up(ifp)) continue;
+            if(!if_up(ifp)) continue;
             send_multihop_request(&ifp->buf, ifp,
                                   prefix, plen, src_prefix, src_plen,
                                   seqno, id, 127);
-	}
+        }
     }
 }
 
