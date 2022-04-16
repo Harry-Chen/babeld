@@ -3,6 +3,8 @@ Packaged-By: Stéphane Glondu <glondu@debian.org>
 Packaged-Date: Thu, 27 Aug 2009 11:38:26 +0200
 Source: http://www.pps.univ-paris-diderot.fr/~jch/software/babel/
 Upstream-Author: Juliusz Chroboczek
+Files-Excluded:
+  rfc6234/rfc6234.txt
 
 Files: *
 Copyright: 2007-2013, Juliusz Chroboczek and others
