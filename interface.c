@@ -20,6 +20,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
+#define __APPLE_USE_RFC_3542
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,6 +43,7 @@ THE SOFTWARE.
 #include "configuration.h"
 #include "local.h"
 #include "xroute.h"
+#include "hmac.h"
 
 #define MIN_MTU 512
 
@@ -122,6 +124,7 @@ flush_interface(char *ifname)
 
     local_notify_interface(ifp, LOCAL_FLUSH);
 
+    free(ifp->ipv4);
     free(ifp);
 
     return 1;
@@ -395,7 +398,10 @@ interface_updown(struct interface *ifp, int up)
 
         if(IF_CONF(ifp, unicast) == CONFIG_YES)
             ifp->flags |= IF_UNICAST;
-
+        if(IF_CONF(ifp, accept_bad_signatures) == CONFIG_YES)
+            ifp->flags |= IF_ACCEPT_BAD_SIGNATURES;
+        else
+            ifp->flags &= ~IF_ACCEPT_BAD_SIGNATURES;
         if(IF_CONF(ifp, hello_interval) > 0)
             ifp->hello_interval = IF_CONF(ifp, hello_interval);
         else if(type == IF_TYPE_WIRELESS)
@@ -473,6 +479,15 @@ interface_updown(struct interface *ifp, int up)
                     ifp->name);
         update_interface_metric(ifp);
         rc = check_interface_ipv4(ifp);
+
+        if(IF_CONF(ifp, key) != ifp->key) {
+            if(ifp->key != NULL)
+                release_key(ifp->key);
+            if(IF_CONF(ifp, key) != NULL)
+                ifp->key = retain_key(IF_CONF(ifp, key));
+            else
+                ifp->key = NULL;
+        }
 
         debugf("Upped interface %s (cost=%d, channel=%d%s).\n",
                ifp->name,

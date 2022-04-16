@@ -53,9 +53,6 @@ THE SOFTWARE.
 
 static int get_sdl(struct sockaddr_dl *sdl, char *ifname);
 
-static const unsigned char v4prefix[16] =
-    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 0, 0, 0, 0 };
-
 int export_table = -1, import_table_count = 0, import_tables[MAX_IMPORT_TABLES];
 
 int
@@ -390,12 +387,6 @@ kernel_interface_channel(const char *ifname, int ifindex)
 {
     errno = ENOSYS;
     return -1;
-}
-
-int
-kernel_disambiguate(int v4)
-{
-    return 0;
 }
 
 int
@@ -854,29 +845,6 @@ kernel_callback(struct kernel_filter *filter)
     return 0;
 
 }
-
-int
-add_rule(int prio, const unsigned char *src_prefix, int src_plen, int table)
-{
-    errno = ENOSYS;
-    return -1;
-}
-
-int
-flush_rule(int prio, int family)
-{
-    errno = ENOSYS;
-    return -1;
-}
-
-int
-change_rule(int new_prio, int old_prio,
-            const unsigned char *src, int plen, int table)
-{
-    errno = ENOSYS;
-    return -1;
-}
-
 
 /* Local Variables:      */
 /* c-basic-offset: 4     */

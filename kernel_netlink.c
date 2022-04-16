@@ -95,9 +95,9 @@ struct old_if {
     int rp_filter;
 };
 
-struct old_if *old_if = NULL;
-int num_old_if = 0;
-int max_old_if = 0;
+static struct old_if *old_if = NULL;
+static int num_old_if = 0;
+static int max_old_if = 0;
 
 static int dgram_socket = -1;
 
@@ -315,7 +315,7 @@ netlink_read(struct netlink *nl, struct netlink *nl_ignore, int answer,
     int done = 0;
     int skip = 0;
 
-    char buf[8192];
+    struct nlmsghdr buf[8192/sizeof(struct nlmsghdr)];
 
     memset(&nladdr, 0, sizeof(nladdr));
     nladdr.nl_family = AF_NETLINK;
@@ -508,7 +508,7 @@ netlink_send_dump(int type, void *data, int len) {
     iov[1].iov_base = data;
     iov[1].iov_len = len;
 
-    memset(buf.raw, 0, sizeof(buf.raw));
+    memset(&buf, 0, sizeof(buf));
     buf.nh.nlmsg_flags = NLM_F_DUMP | NLM_F_REQUEST;
     buf.nh.nlmsg_type = type;
     buf.nh.nlmsg_seq = ++nl_command.seqno;
@@ -553,7 +553,8 @@ kernel_setup(int setup)
         }
         nl_setup = 1;
 
-        if(skip_kernel_setup) return 1;
+        if(skip_kernel_setup)
+            return 1;
 
         for(i=0; i<NUM_SYSCTLS; i++) {
             s = &sysctl_settings[i];
@@ -579,6 +580,14 @@ kernel_setup(int setup)
         close(nl_command.sock);
         nl_command.sock = -1;
         nl_setup = 0;
+
+        if(old_if != NULL) {
+            for(i = 0; i < num_old_if; i++)
+                free(old_if[i].ifname);
+            free(old_if);
+            old_if = NULL;
+            num_old_if = max_old_if = 0;
+        }
 
         if(skip_kernel_setup) return 1;
 
@@ -651,13 +660,13 @@ get_old_if(const char *ifname)
     if(num_old_if >= MAX_INTERFACES)
         return -1;
     if(num_old_if >= max_old_if) {
-            int n = max_old_if == 0 ? 4 : 2 * max_old_if;
-            struct old_if *new =
-                realloc(old_if, n * sizeof(struct old_if));
-            if(new != NULL) {
-                old_if = new;
-                max_old_if = n;
-            }
+        int n = max_old_if == 0 ? 4 : 2 * max_old_if;
+        struct old_if *new =
+            realloc(old_if, n * sizeof(struct old_if));
+        if(new != NULL) {
+            old_if = new;
+            max_old_if = n;
+        }
     }
     if(num_old_if >= max_old_if)
         return -1;
@@ -672,6 +681,8 @@ get_old_if(const char *ifname)
 int
 kernel_setup_interface(int setup, const char *ifname, int ifindex)
 {
+    if(skip_kernel_setup) return 1;
+
     char buf[100];
     int i, rc;
 
@@ -690,11 +701,11 @@ kernel_setup_interface(int setup, const char *ifname, int ifindex)
             fprintf(stderr,
                     "Warning: cannot save old configuration for %s.\n",
                     ifname);
-	if(old_if[i].rp_filter) {
-	    rc = write_proc(buf, 0);
-	    if(rc < 0)
-		return -1;
-	}
+        if(old_if[i].rp_filter) {
+            rc = write_proc(buf, 0);
+            if(rc < 0)
+                return -1;
+        }
     } else {
         if(i >= 0 && old_if[i].rp_filter > 0)
             rc = write_proc(buf, old_if[i].rp_filter);
@@ -926,14 +937,6 @@ kernel_interface_channel(const char *ifname, int ifindex)
         return -1;
 }
 
-/* Return true if we cannot handle disambiguation ourselves. */
-
-int
-kernel_disambiguate(int v4)
-{
-    return !v4 && has_ipv6_subtrees;
-}
-
 int
 kernel_has_ipv6_subtrees(void)
 {
@@ -1016,7 +1019,13 @@ kernel_route(int operation, int table,
 
 
     ipv4 = v4mapped(gate);
-    use_src = (!is_default(src, src_plen) && kernel_disambiguate(ipv4));
+    use_src = !is_default(src, src_plen);
+    if(use_src) {
+        if(ipv4 || !has_ipv6_subtrees) {
+            errno = ENOSYS;
+            return -1;
+        }
+    }
 
     kdebugf("kernel_route: %s %s from %s "
             "table %d metric %d dev %d nexthop %s\n",
@@ -1030,7 +1039,7 @@ kernel_route(int operation, int table,
     if(metric >= KERNEL_INFINITY && (plen == 0 || (ipv4 && plen == 96)))
         return 0;
 
-    memset(buf.raw, 0, sizeof(buf.raw));
+    memset(&buf, 0, sizeof(buf));
     if(operation == ROUTE_ADD) {
         buf.nh.nlmsg_flags = NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL;
         buf.nh.nlmsg_type = RTM_NEWROUTE;
@@ -1085,17 +1094,17 @@ kernel_route(int operation, int table,
         rta->rta_type = RTA_OIF;
         *(int*)RTA_DATA(rta) = ifindex;
 
-#define ADD_IPARG(type, addr) \
-        do if(ipv4) { \
-            rta = RTA_NEXT(rta, len); \
-            rta->rta_len = RTA_LENGTH(sizeof(struct in_addr)); \
-            rta->rta_type = type; \
-            memcpy(RTA_DATA(rta), addr + 12, sizeof(struct in_addr)); \
-        } else { \
-            rta = RTA_NEXT(rta, len); \
-            rta->rta_len = RTA_LENGTH(sizeof(struct in6_addr)); \
-            rta->rta_type = type; \
-            memcpy(RTA_DATA(rta), addr, sizeof(struct in6_addr)); \
+#define ADD_IPARG(type, addr)                                           \
+        do if(ipv4) {                                                   \
+            rta = RTA_NEXT(rta, len);                                   \
+            rta->rta_len = RTA_LENGTH(sizeof(struct in_addr));          \
+            rta->rta_type = type;                                       \
+            memcpy(RTA_DATA(rta), addr + 12, sizeof(struct in_addr));   \
+        } else {                                                        \
+            rta = RTA_NEXT(rta, len);                                   \
+            rta->rta_len = RTA_LENGTH(sizeof(struct in6_addr));         \
+            rta->rta_type = type;                                       \
+            memcpy(RTA_DATA(rta), addr, sizeof(struct in6_addr));       \
         } while (0)
 
         ADD_IPARG(RTA_GATEWAY, gate);
@@ -1115,7 +1124,7 @@ static int
 parse_kernel_route_rta(struct rtmsg *rtm, int len, struct kernel_route *route)
 {
     int table = rtm->rtm_table;
-    struct rtattr *rta= RTM_RTA(rtm);;
+    struct rtattr *rta = RTM_RTA(rtm);
     int i, is_v4;
 
     len -= NLMSG_ALIGN(sizeof(*rtm));
@@ -1203,10 +1212,10 @@ print_kernel_route(int add, int protocol, int type,
     }
 
     kdebugf("%s kernel route: dest: %s/%d gw: %s metric: %d if: %s "
-           "(proto: %d, type: %d)",
-           add == RTM_NEWROUTE ? "Add" : "Delete",
-           addr_prefix, route->plen, addr_gw, route->metric, ifname,
-           protocol, type);
+            "(proto: %d, type: %d)",
+            add == RTM_NEWROUTE ? "Add" : "Delete",
+            addr_prefix, route->plen, addr_gw, route->metric, ifname,
+            protocol, type);
 }
 
 static int
@@ -1340,9 +1349,9 @@ static int
 parse_addr_rta(struct ifaddrmsg *addr, int len, struct in6_addr *res)
 {
     struct rtattr *rta;
+    int is_local = 0;
     len -= NLMSG_ALIGN(sizeof(*addr));
     rta = IFA_RTA(addr);
-    int is_local = 0;
 
     while(RTA_OK(rta, len)) {
         switch(rta->rta_type) {
@@ -1440,64 +1449,6 @@ filter_addresses(struct nlmsghdr *nh, struct kernel_addr *addr)
 }
 
 static int
-filter_kernel_rules(struct nlmsghdr *nh, struct kernel_rule *rule)
-{
-    int len, has_priority = 0, has_table = 0;
-    struct rtmsg *rtm = NULL;
-    struct rtattr *rta = NULL;
-    int is_v4 = 0;
-
-    len = nh->nlmsg_len;
-
-    rtm = (struct rtmsg*)NLMSG_DATA(nh);
-    len -= NLMSG_LENGTH(0);
-
-    rule->src_plen = rtm->rtm_src_len;
-    memset(rule->src, 0, sizeof(rule->src));
-    rule->table = rtm->rtm_table;
-
-    if(rtm->rtm_family != AF_INET && rtm->rtm_family != AF_INET6) {
-        kdebugf("filter_rules: Unknown family: %d\n", rtm->rtm_family);
-        return -1;
-    }
-    is_v4 = rtm->rtm_family == AF_INET;
-
-    rta = RTM_RTA(rtm);
-    len -= NLMSG_ALIGN(sizeof(*rtm));
-
-    for(; RTA_OK(rta, len); rta = RTA_NEXT(rta, len)) {
-        switch(rta->rta_type) {
-        case FRA_UNSPEC: break;
-        case FRA_SRC:
-            rule->src_plen = GET_PLEN(rtm->rtm_src_len, is_v4);
-            COPY_ADDR(rule->src, rta, is_v4);
-            break;
-        case FRA_PRIORITY:
-            rule->priority = *(unsigned int*)RTA_DATA(rta);
-            has_priority = 1;
-            break;
-        case FRA_TABLE:
-            rule->table = *(int*)RTA_DATA(rta);
-            has_table = 1;
-            break;
-        default:
-            kdebugf("filter_rules: Unknown rule attribute: %d.\n",
-                    rta->rta_type);
-            break;
-        }
-    }
-
-    kdebugf("filter_rules: from %s prio %d table %d\n",
-            format_prefix(rule->src, rule->src_plen),
-            has_priority ? rule->priority : -1, rule->table);
-
-    if(!has_priority || !has_table)
-        return 0;
-
-    return 1;
-}
-
-static int
 filter_netlink(struct nlmsghdr *nh, struct kernel_filter *filter)
 {
     int rc;
@@ -1505,7 +1456,6 @@ filter_netlink(struct nlmsghdr *nh, struct kernel_filter *filter)
         struct kernel_route route;
         struct kernel_addr addr;
         struct kernel_link link;
-        struct kernel_rule rule;
     } u;
 
     switch(nh->nlmsg_type) {
@@ -1527,12 +1477,6 @@ filter_netlink(struct nlmsghdr *nh, struct kernel_filter *filter)
         rc = filter_addresses(nh, &u.addr);
         if(rc <= 0) break;
         return filter->addr(&u.addr, filter->addr_closure);
-    case RTM_NEWRULE:
-    case RTM_DELRULE:
-        if(!filter->rule) break;
-        rc = filter_kernel_rules(nh, &u.rule);
-        if(rc <= 0) break;
-        return filter->rule(&u.rule, filter->rule_closure);
     default:
         kdebugf("filter_netlink: unexpected message type %d\n",
                 nh->nlmsg_type);
@@ -1561,145 +1505,4 @@ kernel_callback(struct kernel_filter *filter)
         kernel_setup_socket(1);
 
     return 0;
-}
-
-
-/* Routing table's rules */
-
-int
-add_rule(int prio, const unsigned char *src_prefix, int src_plen, int table)
-{
-    char buffer[64] = {0}; /* 56 needed */
-    struct nlmsghdr *message_header = (void*)buffer;
-    struct rtmsg *message = NULL;
-    struct rtattr *current_attribute = NULL;
-    int is_v4 = v4mapped(src_prefix);
-    int addr_size = is_v4 ? sizeof(struct in_addr) : sizeof(struct in6_addr);
-
-    kdebugf("Add rule v%c prio %d from %s\n", is_v4 ? '4' : '6', prio,
-            format_prefix(src_prefix, src_plen));
-
-    if(is_v4) {
-        src_prefix += 12;
-        src_plen -= 96;
-        if(src_plen < 0) {
-            errno = EINVAL;
-            return -1;
-        }
-    }
-
-#if RTA_ALIGNTO != NLMSG_ALIGNTO
-#error "RTA_ALIGNTO != NLMSG_ALIGNTO"
-#endif
-
-    /* Set the header */
-    message_header->nlmsg_flags = NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL;
-    message_header->nlmsg_type  = RTM_NEWRULE;
-    message_header->nlmsg_len   = NLMSG_ALIGN(sizeof(struct nlmsghdr));
-
-    /* Append the message */
-    message = NLMSG_DATA(message_header);
-    message->rtm_family = is_v4 ? AF_INET : AF_INET6;
-    message->rtm_dst_len = 0;
-    message->rtm_src_len = src_plen;
-    message->rtm_tos = 0;
-    message->rtm_table = table;
-    message->rtm_protocol = RTPROT_BABEL;
-    message->rtm_scope = RT_SCOPE_UNIVERSE;
-    message->rtm_type = RTN_UNICAST;
-    message->rtm_flags = 0;
-    message_header->nlmsg_len += NLMSG_ALIGN(sizeof(struct rtmsg));
-
-    /* Append each attribute */
-    current_attribute = RTM_RTA(message);
-    /* prio */
-    current_attribute->rta_len = RTA_LENGTH(sizeof(int));
-    current_attribute->rta_type = FRA_PRIORITY;
-    *(int*)RTA_DATA(current_attribute) = prio;
-
-    message_header->nlmsg_len += current_attribute->rta_len;
-    current_attribute = (void*)
-        ((char*)current_attribute + current_attribute->rta_len);
-
-    /* src */
-    current_attribute->rta_len = RTA_LENGTH(addr_size);
-    current_attribute->rta_type = FRA_SRC;
-    memcpy(RTA_DATA(current_attribute), src_prefix, addr_size);
-
-    message_header->nlmsg_len += current_attribute->rta_len;
-    current_attribute = (void*)
-        ((char*)current_attribute + current_attribute->rta_len);
-
-    /* send message */
-    if(message_header->nlmsg_len > 64) {
-        errno = EINVAL;
-        return -1;
-    }
-    return netlink_talk(message_header);
-}
-
-int
-flush_rule(int prio, int family)
-{
-    char buffer[64] = {0}; /* 36 needed */
-    struct nlmsghdr *message_header = (void*)buffer;
-    struct rtmsg *message = NULL;
-    struct rtattr *current_attribute = NULL;
-
-    memset(buffer, 0, sizeof(buffer));
-
-    kdebugf("Flush rule v%c prio %d\n", family == AF_INET ? '4' : '6', prio);
-
-#if RTA_ALIGNTO != NLMSG_ALIGNTO
-#error "RTA_ALIGNTO != NLMSG_ALIGNTO"
-#endif
-
-    /* Set the header */
-    message_header->nlmsg_flags = NLM_F_REQUEST;
-    message_header->nlmsg_type  = RTM_DELRULE;
-    message_header->nlmsg_len   = NLMSG_ALIGN(sizeof(struct nlmsghdr));
-
-    /* Append the message */
-    message = NLMSG_DATA(message_header);
-    message->rtm_family = family;
-    message->rtm_dst_len = 0;
-    message->rtm_src_len = 0;
-    message->rtm_tos = 0;
-    message->rtm_table = 0;
-    message->rtm_protocol = RTPROT_BABEL;
-    message->rtm_scope = RT_SCOPE_UNIVERSE;
-    message->rtm_type = RTN_UNSPEC;
-    message->rtm_flags = 0;
-    message_header->nlmsg_len += NLMSG_ALIGN(sizeof(struct rtmsg));
-
-    /* Append each attribute */
-    current_attribute = RTM_RTA(message);
-    /* prio */
-    current_attribute->rta_len = RTA_LENGTH(sizeof(int));
-    current_attribute->rta_type = FRA_PRIORITY;
-    *(int*)RTA_DATA(current_attribute) = prio;
-
-    message_header->nlmsg_len += current_attribute->rta_len;
-    current_attribute = (void*)
-        ((char*)current_attribute + current_attribute->rta_len);
-
-    /* send message */
-    if(message_header->nlmsg_len > 64) {
-        errno = EINVAL;
-        return -1;
-    }
-    return netlink_talk(message_header);
-}
-
-int
-change_rule(int new_prio, int old_prio,
-            const unsigned char *src, int plen, int table)
-{
-    int rc;
-    kdebugf("/Swap: ");
-    rc = add_rule(new_prio, src, plen, table);
-    if(rc < 0)
-        return rc;
-    kdebugf("\\Swap: ");
-    return flush_rule(old_prio, v4mapped(src) ? AF_INET : AF_INET6);
 }

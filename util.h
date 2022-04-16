@@ -79,6 +79,7 @@ void timeval_min(struct timeval *d, const struct timeval *s);
 void timeval_min_sec(struct timeval *d, time_t secs);
 int parse_nat(const char *string) ATTRIBUTE ((pure));
 int parse_thousands(const char *string) ATTRIBUTE ((pure));
+int fromhex(unsigned char *dst, const char *src, int n);
 void do_debugf(int level, const char *format, ...)
     ATTRIBUTE ((format (printf, 2, 3))) COLD;
 int in_prefix(const unsigned char *restrict address,
@@ -102,6 +103,8 @@ int v4mapped(const unsigned char *address) ATTRIBUTE ((pure));
 void v4tov6(unsigned char *dst, const unsigned char *src);
 int daemonise(void);
 int set_src_prefix(unsigned char *src_addr, unsigned char *src_plen);
+
+extern const unsigned char v4prefix[16];
 
 static inline int
 is_default(const unsigned char *prefix, int plen)

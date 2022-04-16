@@ -21,6 +21,7 @@ THE SOFTWARE.
 */
 
 #define MAX_BUFFERED_UPDATES 200
+#define MAX_HMAC_SPACE 48
 
 #define MESSAGE_PAD1 0
 #define MESSAGE_PADN 1
@@ -33,6 +34,11 @@ THE SOFTWARE.
 #define MESSAGE_UPDATE 8
 #define MESSAGE_REQUEST 9
 #define MESSAGE_MH_REQUEST 10
+
+#define MESSAGE_MAC 16
+#define MESSAGE_PC 17
+#define MESSAGE_CHALLENGE_REQUEST 18
+#define MESSAGE_CHALLENGE_REPLY 19
 
 /* Protocol extension through sub-TLVs. */
 #define SUBTLV_PAD1 0
@@ -50,11 +56,16 @@ extern int split_horizon;
 extern unsigned char packet_header[4];
 
 void parse_packet(const unsigned char *from, struct interface *ifp,
-                  const unsigned char *packet, int packetlen);
+                  const unsigned char *packet, int packetlen,
+                  const unsigned char *to);
 void flushbuf(struct buffered *buf, struct interface *ifp);
 void flushupdates(struct interface *ifp);
+int send_pc(struct buffered *buf, struct interface *ifp);
 void send_ack(struct neighbour *neigh, unsigned short nonce,
               unsigned short interval);
+int send_challenge_request(struct neighbour *neigh);
+int send_challenge_reply(struct neighbour *neigh,
+                         const unsigned char *crypto_nonce, int len);
 void send_multicast_hello(struct interface *ifp, unsigned interval, int force);
 void send_unicast_hello(struct neighbour *neigh, unsigned interval, int force);
 void send_hello(struct interface *ifp);

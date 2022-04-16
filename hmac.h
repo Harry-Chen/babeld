@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2014 by Matthieu Boutier and Juliusz Chroboczek.
+Copyright (c) 2018 by Clara Dô and Weronika Kolodziejak
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -20,8 +20,14 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-int kinstall_route(const struct babel_route *route);
-int kuninstall_route(const struct babel_route *route);
-int kswitch_routes(const struct babel_route *old, const struct babel_route *new);
-int kchange_route_metric(const struct babel_route *route,
-                         unsigned refmetric, unsigned cost, unsigned add);
+#define MAX_DIGEST_LEN 32
+
+struct key *find_key(const char *id);
+struct key *retain_key(struct key *key);
+void release_key(struct key *key);
+struct key *add_key(char *id, int type, int len, unsigned char *value);
+int add_hmac(struct buffered *buf, struct interface *ifp,
+             unsigned char *packet_header);
+int check_hmac(const unsigned char *packet, int packetlen, int bodylen,
+               const unsigned char *src, const unsigned char *dst,
+               struct interface *ifp);

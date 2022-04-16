@@ -39,7 +39,6 @@ THE SOFTWARE.
 #include "resend.h"
 #include "configuration.h"
 #include "local.h"
-#include "disambiguation.h"
 
 struct babel_route **routes = NULL;
 static int route_slots = 0, max_route_slots = 0;
@@ -50,22 +49,6 @@ int diversity_factor = 256;     /* in units of 1/256 */
 
 static int smoothing_half_life = 0;
 static int two_to_the_one_over_hl = 0; /* 2^(1/hl) * 0x10000 */
-
-static int
-check_specific_first(void)
-{
-    /* All source-specific routes are in front of the list */
-    int specific = 1;
-    int i;
-    for(i = 0; i < route_slots; i++) {
-        if(is_default(routes[i]->src->src_prefix, routes[i]->src->src_plen)) {
-            specific = 0;
-        } else if(!specific) {
-            return 0;
-        }
-    }
-    return 1;
-}
 
 /* We maintain a list of "slots", ordered by prefix.  Every slot
    contains a linked list of the routes to this prefix, with the
@@ -147,7 +130,7 @@ find_route_slot(const unsigned char *prefix, unsigned char plen,
 struct babel_route *
 find_route(const unsigned char *prefix, unsigned char plen,
            const unsigned char *src_prefix, unsigned char src_plen,
-           struct neighbour *neigh, const unsigned char *nexthop)
+           struct neighbour *neigh)
 {
     struct babel_route *route;
     int i = find_route_slot(prefix, plen, src_prefix, src_plen, NULL);
@@ -158,7 +141,7 @@ find_route(const unsigned char *prefix, unsigned char plen,
     route = routes[i];
 
     while(route) {
-        if(route->neigh == neigh && memcmp(route->nexthop, nexthop, 16) == 0)
+        if(route->neigh == neigh)
             return route;
         route = route->next;
     }
@@ -375,19 +358,16 @@ struct route_stream {
 
 
 struct route_stream *
-route_stream(int which)
+route_stream(int installed)
 {
     struct route_stream *stream;
-
-    if(!check_specific_first())
-        fprintf(stderr, "Invariant failed: specific routes first in RIB.\n");
 
     stream = calloc(1, sizeof(struct route_stream));
     if(stream == NULL)
         return NULL;
 
-    stream->installed = which;
-    stream->index = which == ROUTE_ALL ? -1 : 0;
+    stream->installed = installed;
+    stream->index = installed ? 0 : -1;
     stream->next = NULL;
 
     return stream;
@@ -397,16 +377,12 @@ struct babel_route *
 route_stream_next(struct route_stream *stream)
 {
     if(stream->installed) {
-        while(stream->index < route_slots)
-            if(stream->installed == ROUTE_SS_INSTALLED &&
-               is_default(routes[stream->index]->src->src_prefix,
-                          routes[stream->index]->src->src_plen))
-                return NULL;
-            else if(routes[stream->index]->installed)
+        while(stream->index < route_slots) {
+            if(routes[stream->index]->installed)
                 break;
             else
                 stream->index++;
-
+        }
         if(stream->index < route_slots)
             return routes[stream->index++];
         else
@@ -431,7 +407,7 @@ route_stream_done(struct route_stream *stream)
     free(stream);
 }
 
-int
+static int
 metric_to_kernel(int metric)
 {
         if(metric >= INFINITY) {
@@ -462,6 +438,30 @@ move_installed_route(struct babel_route *route, int i)
     }
 }
 
+static int
+change_route(int operation, const struct babel_route *route, int metric,
+             const unsigned char *new_next_hop,
+             int new_ifindex, int new_metric)
+{
+    struct filter_result filter_result;
+    unsigned char *pref_src = NULL;
+    unsigned int ifindex = route->neigh->ifp->ifindex;
+
+    int m = install_filter(route->src->prefix, route->src->plen,
+                           route->src->src_prefix, route->src->src_plen,
+                           ifindex, &filter_result);
+    if (m < INFINITY)
+        pref_src = filter_result.pref_src;
+
+    int table = filter_result.table ? filter_result.table : export_table;
+
+    return kernel_route(operation, table, route->src->prefix, route->src->plen,
+                        route->src->src_prefix, route->src->src_plen, pref_src,
+                        route->nexthop, ifindex,
+                        metric, new_next_hop, new_ifindex, new_metric,
+                        operation == ROUTE_MODIFY ? table : 0);
+}
+
 void
 install_route(struct babel_route *route)
 {
@@ -484,9 +484,15 @@ install_route(struct babel_route *route)
         return;
     }
 
-    rc = kinstall_route(route);
-    if(rc < 0 && errno != EEXIST)
+    debugf("install_route(%s from %s)\n",
+           format_prefix(route->src->prefix, route->src->plen),
+           format_prefix(route->src->src_prefix, route->src->src_plen));
+    rc = change_route(ROUTE_ADD, route, metric_to_kernel(route_metric(route)),
+                      NULL, 0, 0);
+    if(rc < 0 && errno != EEXIST) {
+        perror("kernel_route(ADD)");
         return;
+    }
 
     route->installed = 1;
     move_installed_route(route, i);
@@ -497,12 +503,22 @@ install_route(struct babel_route *route)
 void
 uninstall_route(struct babel_route *route)
 {
+    int rc;
+
     if(!route->installed)
         return;
 
     route->installed = 0;
 
-    kuninstall_route(route);
+    debugf("uninstall_route(%s from %s)\n",
+           format_prefix(route->src->prefix, route->src->plen),
+           format_prefix(route->src->src_prefix, route->src->src_plen));
+    rc = change_route(ROUTE_FLUSH, route, metric_to_kernel(route_metric(route)),
+                      NULL, 0, 0);
+    if(rc < 0) {
+        perror("kernel_route(FLUSH)");
+        return;
+    }
 
     local_notify_route(route, LOCAL_CHANGE);
 }
@@ -510,7 +526,6 @@ uninstall_route(struct babel_route *route)
 /* This is equivalent to uninstall_route followed with install_route,
    but without the race condition.  The destination of both routes
    must be the same. */
-
 static void
 switch_routes(struct babel_route *old, struct babel_route *new)
 {
@@ -528,9 +543,16 @@ switch_routes(struct babel_route *old, struct babel_route *new)
         fprintf(stderr, "WARNING: switching to unfeasible route "
                 "(this shouldn't happen).");
 
-    rc = kswitch_routes(old, new);
-    if(rc < 0)
+    debugf("switch_routes(%s from %s)\n",
+           format_prefix(old->src->prefix, old->src->plen),
+           format_prefix(old->src->src_prefix, old->src->src_plen));
+    rc = change_route(ROUTE_MODIFY, old, metric_to_kernel(route_metric(old)),
+                      new->nexthop, new->neigh->ifp->ifindex,
+                      metric_to_kernel(route_metric(new)));
+    if(rc < 0) {
+        perror("kernel_route(MODIFY)");
         return;
+    }
 
     old->installed = 0;
     new->installed = 1;
@@ -546,17 +568,21 @@ static void
 change_route_metric(struct babel_route *route,
                     unsigned refmetric, unsigned cost, unsigned add)
 {
-    int old, new;
-    int newmetric = MIN(refmetric + cost + add, INFINITY);
+    int old_metric = metric_to_kernel(route_metric(route)),
+        new_metric = metric_to_kernel(MIN(refmetric + cost + add, INFINITY));
 
-    old = metric_to_kernel(route_metric(route));
-    new = metric_to_kernel(newmetric);
-
-    if(route->installed && old != new) {
+    if(route->installed && old_metric != new_metric) {
         int rc;
-        rc = kchange_route_metric(route, refmetric, cost, add);
-        if(rc < 0)
+        debugf("change_route_metric(%s from %s, %d -> %d)\n",
+               format_prefix(route->src->prefix, route->src->plen),
+               format_prefix(route->src->src_prefix, route->src->src_plen),
+               old_metric, new_metric);
+        rc = change_route(ROUTE_MODIFY, route, old_metric, route->nexthop,
+                          route->neigh->ifp->ifindex, new_metric);
+        if(rc < 0) {
+            perror("kernel_route(MODIFY metric)");
             return;
+        }
     }
 
     /* Update route->smoothed_metric using the old metric. */
@@ -846,13 +872,21 @@ update_route(const unsigned char *id,
     int add_metric;
     int hold_time = MAX((4 * interval) / 100 + interval / 50, 15);
     int is_v4;
-    if(memcmp(id, myid, 8) == 0)
+
+    if(!id) {
+        if(refmetric < INFINITY) {
+            fprintf(stderr, "Update with no id and finite metric.");
+            return NULL;
+        }
+    } else if(memcmp(id, myid, 8) == 0) {
         return NULL;
+    }
 
     if(martian_prefix(prefix, plen) || martian_prefix(src_prefix, src_plen)) {
         fprintf(stderr, "Rejecting martian route to %s from %s through %s.\n",
                 format_prefix(prefix, plen),
-                format_prefix(src_prefix, src_plen), format_address(nexthop));
+                format_prefix(src_prefix, src_plen),
+                nexthop ? format_address(nexthop) : "(unknown)");
         return NULL;
     }
 
@@ -865,7 +899,20 @@ update_route(const unsigned char *id,
     if(add_metric >= INFINITY)
         return NULL;
 
-    route = find_route(prefix, plen, src_prefix, src_plen, neigh, nexthop);
+    route = find_route(prefix, plen, src_prefix, src_plen, neigh);
+
+    if(refmetric >= INFINITY && !route) {
+        /* Somebody's retracting a route that we've never seen. */
+        return NULL;
+    } else if(!id) {
+        /* Pretend the retraction came from the currently installed source. */
+        id = route->src->id;
+    }
+
+    if(!id) {
+        fprintf(stderr, "No id in update_route -- this shouldn't happen.\n");
+        return NULL;
+    }
 
     if(route && memcmp(route->src->id, id, 8) == 0)
         /* Avoid scanning the source table. */
@@ -888,7 +935,7 @@ update_route(const unsigned char *id,
         oldsrc = route->src;
         oldmetric = route_metric(route);
 
-        /* If a successor switches sources, we must accept his update even
+        /* If a successor switches sources, we must accept their update even
            if it makes a route unfeasible in order to break any routing loops
            in a timely manner.  If the source remains the same, we ignore
            the update. */
@@ -950,6 +997,12 @@ update_route(const unsigned char *id,
         if(refmetric >= INFINITY)
             /* Somebody's retracting a route we never saw. */
             return NULL;
+        if(nexthop == NULL) {
+            fprintf(stderr,
+                    "No nexthop in update_route, this shouldn't happen.\n");
+            return NULL;
+        }
+
         if(!feasible) {
             send_unfeasible_request(neigh, 0, seqno, metric, src);
         }

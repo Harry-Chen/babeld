@@ -27,6 +27,8 @@ struct hello_history {
     struct timeval time;
 };
 
+#define NONCE_LEN 8
+
 struct neighbour {
     struct neighbour *next;
     /* This is -1 when unknown, so don't make it unsigned */
@@ -42,8 +44,16 @@ struct neighbour {
        according to remote clock. */
     unsigned int hello_send_us;
     struct timeval hello_rtt_receive_time;
+    struct timeval echo_receive_time;
     unsigned int rtt;
     struct timeval rtt_time;
+    unsigned char pc[4];
+    int index_len; /* This is -1 when index is undefined */
+    unsigned char index[32];
+    unsigned char nonce[NONCE_LEN];
+    struct timeval challenge_deadline;
+    struct timeval challenge_request_limitation;
+    struct timeval challenge_reply_limitation;
     struct interface *ifp;
     struct buffered buf;
 };
@@ -53,7 +63,6 @@ extern struct neighbour *neighs;
 #define FOR_ALL_NEIGHBOURS(_neigh) \
     for(_neigh = neighs; _neigh; _neigh = _neigh->next)
 
-int neighbour_valid(struct neighbour *neigh);
 void flush_neighbour(struct neighbour *neigh);
 struct neighbour *find_neighbour(const unsigned char *address,
                                  struct interface *ifp);

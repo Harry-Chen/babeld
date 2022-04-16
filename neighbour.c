@@ -34,6 +34,7 @@ THE SOFTWARE.
 #include "interface.h"
 #include "neighbour.h"
 #include "source.h"
+#include "hmac.h"
 #include "route.h"
 #include "message.h"
 #include "resend.h"
@@ -105,7 +106,12 @@ find_neighbour(const unsigned char *address, struct interface *ifp)
     neigh->ihu_time = now;
     neigh->hello.time = neigh->uhello.time = zero;
     neigh->hello_rtt_receive_time = zero;
+    neigh->echo_receive_time = zero;
     neigh->rtt_time = zero;
+    neigh->index_len = -1;
+    neigh->challenge_deadline = zero;
+    neigh->challenge_request_limitation = zero;
+    neigh->challenge_reply_limitation = zero;
     neigh->ifp = ifp;
     neigh->buf.buf = buf;
     neigh->buf.size = ifp->buf.size;
@@ -171,9 +177,11 @@ update_neighbour(struct neighbour *neigh, struct hello_history *hist,
     }
 
     if(missed_hellos > 0) {
-        hist->reach >>= missed_hellos;
+        if((unsigned)missed_hellos >= sizeof(hist->reach) * 8)
+            hist->reach = 0;
+        else
+            hist->reach >>= missed_hellos;
         hist->seqno = seqno_plus(hist->seqno, missed_hellos);
-        missed_hellos = 0;
         rc = 1;
     }
 
