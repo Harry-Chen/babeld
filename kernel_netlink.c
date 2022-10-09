@@ -39,7 +39,6 @@ THE SOFTWARE.
 #include <sys/socket.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
-#include <linux/fib_rules.h>
 #include <net/if_arp.h>
 
 /* From <linux/if_bridge.h> */
@@ -109,6 +108,54 @@ static int dgram_socket = -1;
 
 static int filter_netlink(struct nlmsghdr *nh, struct kernel_filter *filter);
 
+static int
+get_old_if(const char *ifname)
+{
+    int i;
+    for(i = 0; i < num_old_if; i++)
+        if(strcmp(old_if[i].ifname, ifname) == 0)
+            return i;
+    if(num_old_if >= MAX_INTERFACES)
+        return -1;
+    if(num_old_if >= max_old_if) {
+        int n = max_old_if == 0 ? 4 : 2 * max_old_if;
+        struct old_if *new =
+            realloc(old_if, n * sizeof(struct old_if));
+        if(new != NULL) {
+            old_if = new;
+            max_old_if = n;
+        }
+    }
+    if(num_old_if >= max_old_if)
+        return -1;
+
+    old_if[num_old_if].ifname = strdup(ifname);
+    if(old_if[num_old_if].ifname == NULL)
+        return -1;
+    old_if[num_old_if].rp_filter = -1;
+    return num_old_if++;
+}
+
+static void
+free_old_if(int i)
+{
+    if(i < 0 || i >= num_old_if) {
+        fprintf(stderr, "free_old_if: out of range (%d/%d)\n",
+                i, num_old_if);
+        return;
+    }
+    free(old_if[i].ifname);
+    old_if[i].ifname = NULL;
+    if(i != num_old_if - 1)
+        memcpy(&old_if[i], &old_if[num_old_if - 1], sizeof(struct old_if));
+    VALGRIND_MAKE_MEM_UNDEFINED(&old_if[num_old_if - 1], sizeof(struct old_if));
+    num_old_if--;
+    if(num_old_if == 0) {
+        free(old_if);
+        old_if = NULL;
+        max_old_if = 0;
+    }
+}
 
 /* Determine an interface's hardware address, in modified EUI-64 format */
 int
@@ -236,7 +283,7 @@ static int nl_setup = 0;
 static int
 netlink_socket(struct netlink *nl, uint32_t groups)
 {
-    int rc;
+    int rc, one = 1;
     int rcvsize = 512 * 1024;
 
     nl->sock = socket(PF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
@@ -272,6 +319,11 @@ netlink_socket(struct netlink *nl, uint32_t groups)
         }
     }
 
+    rc = setsockopt(nl->sock, SOL_NETLINK, NETLINK_EXT_ACK,
+                    &one, sizeof(one));
+    if(rc < 0)
+        perror("Warning: couldn't enable netlink extended acks");
+
     rc = bind(nl->sock, (struct sockaddr *)&nl->sockaddr, nl->socklen);
     if(rc < 0)
         goto fail;
@@ -290,6 +342,43 @@ netlink_socket(struct netlink *nl, uint32_t groups)
         errno = saved_errno;
         return -1;
     }
+}
+
+#define NLA_OK(nla,len) ((len) >= (int)sizeof(struct nlattr) && \
+			 (nla)->nla_len >= sizeof(struct nlattr) && \
+			 (nla)->nla_len <= (len))
+#define NLA_NEXT(nla,attrlen)	((attrlen) -= NLA_ALIGN((nla)->nla_len), \
+				 (struct nlattr*)(((char*)(nla)) + NLA_ALIGN((nla)->nla_len)))
+#define NLA_LENGTH(len)	(NLA_ALIGN(sizeof(struct nlattr)) + (len))
+#define NLA_DATA(nla)   ((void*)(((char*)(nla)) + NLA_LENGTH(0)))
+
+static int netlink_get_extack(struct nlmsghdr *nh, int len, int done)
+{
+    const char *msg = NULL;
+    struct nlattr *nla;
+
+    if (done) {
+        nla = NLMSG_DATA(nh) + sizeof(int);
+        len -= NLMSG_ALIGN(int);
+    } else {
+        nla = NLMSG_DATA(nh) + sizeof(struct nlmsgerr);
+        len -= NLMSG_ALIGN(sizeof(struct nlmsgerr));
+
+        if (!(nh->nlmsg_flags & NLM_F_ACK_TLVS))
+            return 0;
+    }
+
+    while(NLA_OK(nla, len)) {
+        if(nla->nla_type == NLMSGERR_ATTR_MSG)
+            msg = NLA_DATA(nla);
+
+        nla = NLA_NEXT(nla, len);
+    }
+
+    if(msg && *msg != '\0')
+        kdebugf(" extack: '%s' ", msg);
+
+    return 0;
 }
 
 static int
@@ -378,11 +467,13 @@ netlink_read(struct netlink *nl, struct netlink *nl_ignore, int answer,
                         nh->nlmsg_pid, nl->sockaddr.nl_pid);
                 continue;
             } else if(nh->nlmsg_type == NLMSG_DONE) {
+                netlink_get_extack(nh, len, 1);
                 kdebugf("(done)\n");
                 done = 1;
                 break;
             } else if(nh->nlmsg_type == NLMSG_ERROR) {
                 struct nlmsgerr *err = (struct nlmsgerr *)NLMSG_DATA(nh);
+                netlink_get_extack(nh, len, 0);
                 if(err->error == 0) {
                     kdebugf("(ACK)\n");
                     return 0;
@@ -581,13 +672,9 @@ kernel_setup(int setup)
         nl_command.sock = -1;
         nl_setup = 0;
 
-        if(old_if != NULL) {
-            for(i = 0; i < num_old_if; i++)
-                free(old_if[i].ifname);
-            free(old_if);
-            old_if = NULL;
-            num_old_if = max_old_if = 0;
-        }
+        while(num_old_if > 0)
+            free_old_if(num_old_if - 1);
+        max_old_if = 0;
 
         if(skip_kernel_setup) return 1;
 
@@ -624,13 +711,9 @@ kernel_setup_socket(int setup)
                           | rtnlgrp_to_mask(RTNLGRP_IPV4_ROUTE)
                           | rtnlgrp_to_mask(RTNLGRP_LINK)
                           | rtnlgrp_to_mask(RTNLGRP_IPV4_IFADDR)
-                          | rtnlgrp_to_mask(RTNLGRP_IPV6_IFADDR)
-    /* We monitor rules, because it can be change by third parties.  For example
-       a /etc/init.d/network restart on OpenWRT flush the rules. */
-                          | rtnlgrp_to_mask(RTNLGRP_IPV4_RULE)
-                          | rtnlgrp_to_mask(RTNLGRP_IPV6_RULE));
+                          | rtnlgrp_to_mask(RTNLGRP_IPV6_IFADDR));
         if(rc < 0) {
-            perror("netlink_socket(_ROUTE | _LINK | _IFADDR | _RULE)");
+            perror("netlink_socket(_ROUTE | _LINK | _IFADDR)");
             kernel_socket = -1;
             return -1;
         }
@@ -648,34 +731,6 @@ kernel_setup_socket(int setup)
         return 1;
 
     }
-}
-
-static int
-get_old_if(const char *ifname)
-{
-    int i;
-    for(i = 0; i < num_old_if; i++)
-        if(strcmp(old_if[i].ifname, ifname) == 0)
-            return i;
-    if(num_old_if >= MAX_INTERFACES)
-        return -1;
-    if(num_old_if >= max_old_if) {
-        int n = max_old_if == 0 ? 4 : 2 * max_old_if;
-        struct old_if *new =
-            realloc(old_if, n * sizeof(struct old_if));
-        if(new != NULL) {
-            old_if = new;
-            max_old_if = n;
-        }
-    }
-    if(num_old_if >= max_old_if)
-        return -1;
-
-    old_if[num_old_if].ifname = strdup(ifname);
-    if(old_if[num_old_if].ifname == NULL)
-        return -1;
-    old_if[num_old_if].rp_filter = -1;
-    return num_old_if++;
 }
 
 int
@@ -707,12 +762,16 @@ kernel_setup_interface(int setup, const char *ifname, int ifindex)
                 return -1;
         }
     } else {
-        if(i >= 0 && old_if[i].rp_filter > 0)
-            rc = write_proc(buf, old_if[i].rp_filter);
-        else if(i < 0)
+        if(i >= 0) {
+            if(old_if[i].rp_filter > 0)
+                rc = write_proc(buf, old_if[i].rp_filter);
+            else
+                rc = 1;
+            free_old_if(i);
+        } else {
             rc = -1;
-        else
-            rc = 1;
+            errno = ENOENT;
+        }
 
         if(rc < 0)
             fprintf(stderr,
@@ -944,6 +1003,21 @@ kernel_has_ipv6_subtrees(void)
 }
 
 int
+kernel_has_v4viav6(void)
+{
+    /* v4-via-v6 was introduced in Linux by commit
+       d15662682db232da77136cd348f4c9df312ca6f9 first released as 5.2 */
+    return (kernel_older_than("Linux", 5, 2) == 0);
+}
+
+/* Whether the kernel is able to source ICMPv4 without an IPv4 address. */
+int
+kernel_safe_v4viav6(void)
+{
+    return (kernel_older_than("Linux", 5, 13) == 0);
+}
+
+int
 kernel_route(int operation, int table,
              const unsigned char *dest, unsigned short plen,
              const unsigned char *src, unsigned short src_plen,
@@ -956,7 +1030,7 @@ kernel_route(int operation, int table,
     struct rtmsg *rtm;
     struct rtattr *rta;
     int len = sizeof(buf.raw);
-    int rc, ipv4, use_src = 0;
+    int rc, ipv4, is_v4_over_v6, use_src = 0;
 
     if(!nl_setup) {
         fprintf(stderr,"kernel_route: netlink not initialized.\n");
@@ -978,8 +1052,7 @@ kernel_route(int operation, int table,
 
     /* Check that the protocol family is consistent. */
     if(plen >= 96 && v4mapped(dest)) {
-        if(!v4mapped(gate) ||
-           !v4mapped(src)) {
+        if(!v4mapped(src)) {
             errno = EINVAL;
             return -1;
         }
@@ -1018,7 +1091,8 @@ kernel_route(int operation, int table,
     }
 
 
-    ipv4 = v4mapped(gate);
+    ipv4 = v4mapped(dest);
+    is_v4_over_v6 = ipv4 && !v4mapped(gate);
     use_src = !is_default(src, src_plen);
     if(use_src) {
         if(ipv4 || !has_ipv6_subtrees) {
@@ -1094,23 +1168,32 @@ kernel_route(int operation, int table,
         rta->rta_type = RTA_OIF;
         *(int*)RTA_DATA(rta) = ifindex;
 
-#define ADD_IPARG(type, addr)                                           \
-        do if(ipv4) {                                                   \
-            rta = RTA_NEXT(rta, len);                                   \
-            rta->rta_len = RTA_LENGTH(sizeof(struct in_addr));          \
-            rta->rta_type = type;                                       \
-            memcpy(RTA_DATA(rta), addr + 12, sizeof(struct in_addr));   \
-        } else {                                                        \
-            rta = RTA_NEXT(rta, len);                                   \
-            rta->rta_len = RTA_LENGTH(sizeof(struct in6_addr));         \
-            rta->rta_type = type;                                       \
-            memcpy(RTA_DATA(rta), addr, sizeof(struct in6_addr));       \
+#define ADD_IPARG(type, addr) \
+        do { \
+            rta = RTA_NEXT(rta, len); \
+            rta->rta_type = type; \
+            if(v4mapped(addr)) { \
+                rta->rta_len = RTA_LENGTH(sizeof(struct in_addr)); \
+                memcpy(RTA_DATA(rta), addr + 12, sizeof(struct in_addr)); \
+            } else { \
+                if(type == RTA_VIA) { \
+                    rta->rta_len = RTA_LENGTH(sizeof(struct in6_addr) + 2); \
+                    *((sa_family_t*) RTA_DATA(rta)) = AF_INET6; \
+                    memcpy(RTA_DATA(rta) + 2, addr, sizeof(struct in6_addr)); \
+                } else { \
+                    rta->rta_len = RTA_LENGTH(sizeof(struct in6_addr)); \
+                    memcpy(RTA_DATA(rta), addr, sizeof(struct in6_addr)); \
+                } \
+            } \
         } while (0)
 
-        ADD_IPARG(RTA_GATEWAY, gate);
+        if(is_v4_over_v6)
+            ADD_IPARG(RTA_VIA, gate);
+        else
+            ADD_IPARG(RTA_GATEWAY, gate);
+
         if(pref_src)
             ADD_IPARG(RTA_PREFSRC, pref_src);
-
 #undef ADD_IPARG
     } else {
         *(int*)RTA_DATA(rta) = -1;
@@ -1296,17 +1379,6 @@ kernel_dump(int operation, struct kernel_filter *filter)
                 return -1;
         }
 
-        memset(&g, 0, sizeof(g));
-        g.rtgen_family = families[i];
-        if(operation & CHANGE_RULE) {
-            rc = netlink_send_dump(RTM_GETRULE, &g, sizeof(g));
-            if(rc < 0)
-                return -1;
-
-            rc = netlink_read(&nl_command, NULL, 1, filter);
-            if(rc < 0)
-                return -1;
-        }
     }
 
     if(operation & CHANGE_ADDR) {
