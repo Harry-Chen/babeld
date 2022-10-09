@@ -1,9 +1,27 @@
+18 May 2022: babeld-1.12.1
+
+  * Implement separate PC values for unicast and multicast, which avoids
+    dropping packets protected by MAC when WiFi powersave is active.
+    Thanks to Daniel Gröber.
+  * Schedule an interface check just after adding an interface.
+    Thanks to Andrew Hoff.
+
+5 May 2022: babeld-1.12
+
+  * Implement v4-via-v6 routing (RFC 9229), which allows a router with
+    IPv4 addresses only to route IPv4.  Thanks to Théophile Bastian.
+  * Enable extended Netlink acks when available.
+    Thanks to Toke Høyland-Jørgensen.
+  * Fix restoring of interface configuration to avoid unbounded memory
+    consumption.  Thanks to andrew-hoff.
+  * Fix handling of deny filters in the install chain.
+
 30 March 2022: babeld-1.11
 
   * Implemented MAC authentication (RFC 8967).  Thanks to Clara Dô,
     Weronika Kołodziejak and Antonin Décimo.
   * Changed the interface of the add_filter function in order to simplify
-    integration in OpenWRT.  Thanks to Nick Hainke.
+    integration in OpenWrt.  Thanks to Nick Hainke.
 
 25 April 2021: babeld-1.10
 
