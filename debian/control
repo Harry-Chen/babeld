@@ -2,7 +2,7 @@ Source: babeld
 Section: net
 Priority: optional
 Maintainer: Stéphane Glondu <glondu@debian.org>
-Uploaders: Benda Xu <heroxbd@gentoo.org>
+Uploaders: Benda Xu <orv@debian.org>
 Build-Depends: debhelper-compat (= 13), libb2-dev
 Standards-Version: 4.6.0
 Homepage: http://www.pps.univ-paris-diderot.fr/~jch/software/babel/
