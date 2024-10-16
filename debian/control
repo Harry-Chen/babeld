@@ -15,6 +15,7 @@ Architecture: any
 Depends:
  ${shlibs:Depends},
  ${misc:Depends}
+Pre-Depends: ${misc:Pre-Depends}
 Suggests: ahcpd
 Description: loop-free distance-vector routing protocol
  Babel is a distance-vector routing protocol for IPv6 and IPv4 with
