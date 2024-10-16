@@ -1,1 +1,2 @@
+usr/bin/babeld /usr/sbin/
 debian/babeld.conf /etc
