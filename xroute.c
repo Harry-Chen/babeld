@@ -153,9 +153,18 @@ add_xroute(unsigned char prefix[16], unsigned char plen,
 }
 
 void
-flush_xroute(struct xroute *xroute)
+flush_xroute(struct xroute *xroute, int send_updates)
 {
     int i;
+    unsigned char prefix[16], plen;
+    unsigned char src_prefix[16], src_plen;
+    struct babel_route *route;
+
+    /* We'll use these after we free the xroute */
+    memcpy(prefix, xroute->prefix, 16);
+    plen = xroutes->plen;
+    memcpy(src_prefix, xroutes->src_prefix, 16);
+    src_plen = xroute->src_plen;
 
     i = xroute - xroutes;
     assert(i >= 0 && i < numxroutes);
@@ -180,6 +189,17 @@ flush_xroute(struct xroute *xroute)
             return;
         xroutes = new_xroutes;
         maxxroutes = n;
+    }
+
+    route = find_best_route(prefix, plen, src_prefix, src_plen, 1, NULL);
+    if(route != NULL && route_metric(route) < INFINITY &&
+       route_feasible(route)) {
+        install_route(route);
+        if(send_updates)
+            send_update(NULL, 0, prefix, plen, src_prefix, src_plen);
+    } else {
+        if(send_updates)
+            send_update_resend(NULL, prefix, plen, src_prefix, src_plen);
     }
 }
 
@@ -221,24 +241,22 @@ xroute_stream_done(struct xroute_stream *stream)
     free(stream);
 }
 
-static int
-filter_route(struct kernel_route *route, void *data) {
+static void
+filter_route(int add, struct kernel_route *route, void *data) {
     void **args = (void**)data;
     int maxroutes = *(int*)args[0];
     struct kernel_route *routes = (struct kernel_route *)args[1];
     int *found = (int*)args[2];
 
     if(*found >= maxroutes)
-        return -1;
+        return;
 
     if(martian_prefix(route->prefix, route->plen) ||
        martian_prefix(route->src_prefix, route->src_plen))
-        return 0;
+        return;
 
     routes[*found] = *route;
     ++ *found;
-
-    return 0;
 }
 
 static int
@@ -255,8 +273,9 @@ kernel_routes(struct kernel_route *routes, int maxroutes)
     return found;
 }
 
-static int
-filter_address(struct kernel_addr *addr, void *data) {
+static void
+filter_address(int add, struct kernel_addr *addr, void *data)
+{
     void **args = (void **)data;
     int maxroutes = *(int *)args[0];
     struct kernel_route *routes = (struct kernel_route*)args[1];
@@ -266,14 +285,14 @@ filter_address(struct kernel_addr *addr, void *data) {
     struct kernel_route *route = NULL;
 
     if(*found >= maxroutes)
-        return 0;
+        return;
 
     if(ll == !IN6_IS_ADDR_LINKLOCAL(&addr->addr))
-        return 0;
+        return;
 
     /* ifindex may be 0 -- see kernel_addresses */
     if(ifindex && addr->ifindex != ifindex)
-        return 0;
+        return;
 
     route = &routes[*found];
     memset(route, 0, sizeof(struct kernel_route));
@@ -288,8 +307,6 @@ filter_address(struct kernel_addr *addr, void *data) {
     route->proto = RTPROT_BABEL_LOCAL;
     memset(route->gw, 0, 16);
     ++ *found;
-
-    return 1;
 }
 
 /* ifindex is 0 for all interfaces.  ll indicates whether we are
@@ -338,8 +355,86 @@ kernel_route_compare(const void *v1, const void *v2)
     return 0;
 }
 
+static void
+modify_xroute(int i, struct kernel_route *kroute, int update) {
+    if(xroutes[i].metric != kroute->metric ||
+       xroutes[i].proto != kroute->proto) {
+        xroutes[i].metric = kroute->metric;
+        xroutes[i].proto = kroute->proto;
+        local_notify_xroute(&xroutes[i], LOCAL_CHANGE);
+        if(update)
+            send_update(NULL, 0, xroutes[i].prefix, xroutes[i].plen,
+                        xroutes[i].src_prefix, xroutes[i].src_plen);
+    }
+}
+
+static void
+flush_duplicate_route(struct kernel_route *kroute) {
+    struct babel_route *route;
+    route = find_installed_route(kroute->prefix, kroute->plen,
+                                 kroute->src_prefix, kroute->src_plen);
+    if(route) {
+        if(allow_duplicates < 0 || kroute->metric < allow_duplicates)
+            uninstall_route(route);
+    }
+}
+
+
+void
+kernel_route_notify(int add, struct kernel_route *kroute, void *closure)
+{
+    struct filter_result filter_result;
+    int i, rc;
+
+    debugf("Kernel route: %s %s",
+           add ? "add" : "del", format_prefix(kroute->prefix, kroute->plen));
+
+    kroute->metric = redistribute_filter(kroute->prefix, kroute->plen,
+                                         kroute->src_prefix, kroute->src_plen,
+                                         kroute->ifindex, kroute->proto,
+                                         &filter_result);
+
+    if(filter_result.src_prefix != NULL) {
+        memcpy(kroute->src_prefix, filter_result.src_prefix, 16);
+        kroute->src_plen = filter_result.src_plen;
+    }
+
+    if(kroute->metric >= INFINITY)
+        return;
+
+    i = find_xroute_slot(kroute->prefix, kroute->plen,
+                         kroute->src_prefix, kroute->src_plen, NULL);
+    if(!add) {
+        if(i >= 0)
+            flush_xroute(&xroutes[i], 1);
+        else
+            debugf("Flushing unknown route.\n");
+        return;
+    }
+
+    if(i >= 0) {
+        modify_xroute(i, kroute, 1);
+        return;
+    }
+
+    if(martian_prefix(kroute->prefix, kroute->plen))
+        return;
+
+    rc = add_xroute(kroute->prefix, kroute->plen,
+                    kroute->src_prefix, kroute->src_plen,
+                    kroute->metric, kroute->ifindex,
+                    kroute->proto);
+    if(rc > 0) {
+        flush_duplicate_route(kroute);
+        send_update(NULL, 0, kroute->prefix, kroute->plen,
+                    kroute->src_prefix, kroute->src_plen);
+    }
+
+}
+
+
 int
-check_xroutes(int send_updates)
+check_xroutes(int send_updates, int warn)
 {
     int i, j, change = 0, rc;
     struct kernel_route *routes;
@@ -410,21 +505,17 @@ check_xroutes(int send_updates)
             /* Add route i. */
             if(!martian_prefix(routes[i].prefix, routes[i].plen) &&
                routes[i].metric < INFINITY) {
+                if(warn)
+                    fprintf(stderr,
+                            "Adding missing route to %s "
+                            "(this shouldn't happen)\n",
+                            format_prefix(routes[i].prefix, routes[i].plen));
                 rc = add_xroute(routes[i].prefix, routes[i].plen,
                                 routes[i].src_prefix, routes[i].src_plen,
                                 routes[i].metric, routes[i].ifindex,
                                 routes[i].proto);
                 if(rc > 0) {
-                    struct babel_route *route;
-                    route = find_installed_route(routes[i].prefix,
-                                                 routes[i].plen,
-                                                 routes[i].src_prefix,
-                                                 routes[i].src_plen);
-                    if(route) {
-                        if(allow_duplicates < 0 ||
-                           routes[i].metric < allow_duplicates)
-                            uninstall_route(route);
-                    }
+                    flush_duplicate_route(&routes[i]);
                     if(send_updates)
                         send_update(NULL, 0, routes[i].prefix, routes[i].plen,
                                     routes[i].src_prefix, routes[i].src_plen);
@@ -434,32 +525,14 @@ check_xroutes(int send_updates)
             i++;
         } else if(rc > 0) {
             /* Flush xroute j. */
-            unsigned char prefix[16], plen;
-            unsigned char src_prefix[16], src_plen;
-            struct babel_route *route;
-            memcpy(prefix, xroutes[i].prefix, 16);
-            plen = xroutes[i].plen;
-            memcpy(src_prefix, xroutes[i].src_prefix, 16);
-            src_plen = xroutes[i].src_plen;
-            flush_xroute(&xroutes[j]);
-            route = find_best_route(prefix, plen, src_prefix, src_plen,
-                                    1, NULL);
-            if(route != NULL) {
-                install_route(route);
-                send_update(NULL, 0, prefix, plen, src_prefix, src_plen);
-            } else {
-                send_update_resend(NULL, prefix, plen, src_prefix, src_plen);
-            }
+            if(warn)
+                fprintf(stderr,
+                        "Flushing spurious route to %s "
+                        "(this shouldn't happen)\n",
+                        format_prefix(xroutes[j].prefix, xroutes[j].plen));
+            flush_xroute(&xroutes[j], send_updates);
         } else {
-            if(routes[i].metric != xroutes[j].metric ||
-               routes[i].proto != xroutes[j].proto) {
-                xroutes[j].metric = routes[i].metric;
-                xroutes[j].proto = routes[i].proto;
-                local_notify_xroute(&xroutes[j], LOCAL_CHANGE);
-                if(send_updates)
-                    send_update(NULL, 0, xroutes[j].prefix, xroutes[j].plen,
-                                xroutes[j].src_prefix, xroutes[j].src_plen);
-            }
+            modify_xroute(j, &routes[i], send_updates);
             i++;
             j++;
         }

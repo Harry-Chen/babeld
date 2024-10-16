@@ -622,28 +622,6 @@ parse_anonymous_ifconf(int c, gnc_t gnc, void *closure,
             if(c < -1)
                 goto error;
             if_conf->split_horizon = v;
-        } else if(strcmp(token, "channel") == 0) {
-            char *t, *end;
-
-            c = getword(c, &t, gnc, closure);
-            if(c < -1)
-                goto error;
-
-            if(strcmp(t, "noninterfering") == 0)
-                if_conf->channel = IF_CHANNEL_NONINTERFERING;
-            else if(strcmp(t, "interfering") == 0)
-                if_conf->channel = IF_CHANNEL_INTERFERING;
-            else {
-                if_conf->channel = strtol(t, &end, 0);
-                if(*end != '\0')
-                    goto error;
-            }
-
-            free(t);
-
-            if((if_conf->channel < 1 || if_conf->channel > 255) &&
-               if_conf->channel != IF_CHANNEL_NONINTERFERING)
-                goto error;
         } else if(strcmp(token, "enable-timestamps") == 0) {
             int v;
             c = getbool(c, &v, gnc, closure);
@@ -706,6 +684,12 @@ parse_anonymous_ifconf(int c, gnc_t gnc, void *closure,
             if(c < -1)
                 goto error;
             if_conf->v4viav6 = v;
+        } else if(strcmp(token, "probe-mtu") == 0) {
+            int v;
+            c = getbool(c, &v, gnc, closure);
+            if(c < -1)
+                goto error;
+            if_conf->probe_mtu = v;
         } else {
             goto error;
         }
@@ -916,7 +900,6 @@ merge_ifconf(struct interface_conf *dest,
     MERGE(faraway);
     MERGE(unicast);
     MERGE(accept_bad_signatures);
-    MERGE(channel);
     MERGE(enable_timestamps);
     MERGE(rfc6126);
     MERGE(rtt_decay);
@@ -924,6 +907,7 @@ merge_ifconf(struct interface_conf *dest,
     MERGE(rtt_max);
     MERGE(max_rtt_penalty);
     MERGE(v4viav6);
+    MERGE(probe_mtu);
     MERGE(key);
 
 #undef MERGE
@@ -991,8 +975,6 @@ parse_option(int c, gnc_t gnc, void *closure, char *token)
     if(config_finalised) {
         if(strcmp(token, "link-detect") != 0 &&
            strcmp(token, "log-file") != 0 &&
-           strcmp(token, "diversity") != 0 &&
-           strcmp(token, "diversity-factor") != 0 &&
            strcmp(token, "smoothing-half-life") != 0)
             goto error;
     }
@@ -1003,7 +985,9 @@ parse_option(int c, gnc_t gnc, void *closure, char *token)
        strcmp(token, "local-port") == 0 ||
        strcmp(token, "local-port-readwrite") == 0 ||
        strcmp(token, "export-table") == 0 ||
-       strcmp(token, "import-table") == 0) {
+       strcmp(token, "import-table") == 0 ||
+       strcmp(token, "kernel-check-interval") == 0 ||
+       strcmp(token, "shutdown-delay-ms") == 0) {
         int v;
         c = getint(c, &v, gnc, closure);
         if(c < -1 || v <= 0 || v >= 0xFFFF)
@@ -1013,7 +997,7 @@ parse_option(int c, gnc_t gnc, void *closure, char *token)
             protocol_port = v;
         else if(strcmp(token, "kernel-priority") == 0)
             kernel_metric = v;
-        else if(strcmp(token, "allow_duplicates") == 0)
+        else if(strcmp(token, "allow-duplicates") == 0)
             allow_duplicates = v;
         else if(strcmp(token, "local-port") == 0) {
             local_server_port = v;
@@ -1029,7 +1013,11 @@ parse_option(int c, gnc_t gnc, void *closure, char *token)
             export_table = v;
         else if(strcmp(token, "import-table") == 0)
             add_import_table(v);
-        else
+        else if(strcmp(token, "kernel-check-interval") == 0)
+            kernel_check_interval = v;
+        else if(strcmp(token, "shutdown-delay-ms") == 0)
+	    shutdown_delay_msec = v;
+	else
             abort();
     } else if(strcmp(token, "link-detect") == 0 ||
               strcmp(token, "random-id") == 0 ||
@@ -1098,27 +1086,6 @@ parse_option(int c, gnc_t gnc, void *closure, char *token)
         if(c < -1 || d < 0)
             goto error;
         debug = d;
-    } else if(strcmp(token, "diversity") == 0) {
-        int d;
-        c = skip_whitespace(c, gnc, closure);
-        if(c >= '0' && c <= '9') {
-            c = getint(c, &d, gnc, closure);
-            if(c < -1)
-                goto error;
-        } else {
-            int b;
-            c = getbool(c, &b, gnc, closure);
-            if(c < -1)
-                goto error;
-            d = (b == CONFIG_YES) ? 3 : 0;
-        }
-        diversity_kind = d;
-    } else if(strcmp(token, "diversity-factor") == 0) {
-        int f;
-        c = getint(c, &f, gnc, closure);
-        if(c < -1 || f < 0 || f > 256)
-            goto error;
-        diversity_factor = f;
     } else if(strcmp(token, "smoothing-half-life") == 0) {
         int h;
         c = getint(c, &h, gnc, closure);
@@ -1331,13 +1298,16 @@ parse_config_from_file(const char *filename, int *line_return)
     }
 
     c = gnc_file(&s);
-    if(c < 0)
+    if(c < 0) {
+        fclose(s.f);
         return 0;
+    }
 
     while(1) {
         c = parse_config_line(c, (gnc_t)gnc_file, &s, NULL, NULL);
         if(c < -1) {
             *line_return = s.line;
+            fclose(s.f);
             return -1;
         }
         if(c == -1)
