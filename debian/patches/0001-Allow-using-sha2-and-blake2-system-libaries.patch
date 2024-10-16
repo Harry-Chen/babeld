@@ -2,6 +2,7 @@ From 7a9f8797a087b0cea6851df0aa346651acabbfb7 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Daniel=20Gr=C3=B6ber?= <dxld@darkboxed.org>
 Date: Fri, 8 Apr 2022 14:42:10 +0200
 Subject: [PATCH 1/2] Allow using sha2 and blake2 system libaries
+Forwarded: not-needed
 
 Using ?= to assign LDLIBS and the new BLAKE_* SHA2_* vars allows overriding
 them from the environment and use system libraries instead of the bundled
