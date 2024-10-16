@@ -1,4 +1,4 @@
-version=3
+version=4
 opts="pgpsigurlmangle=s/$/.asc/,\
 repacksuffix=+ds,dversionmangle=s/\+ds//g" \
 https://www.irif.fr/~jch/software/files/ babeld-(.*).tar.gz
