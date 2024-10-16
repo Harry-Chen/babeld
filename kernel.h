@@ -46,12 +46,11 @@ struct kernel_link {
 };
 
 struct kernel_filter {
-    /* return -1 to interrupt search. */
-    int (*addr)(struct kernel_addr *, void *);
+    void (*addr)(int, struct kernel_addr *, void *);
     void *addr_closure;
-    int (*route)(struct kernel_route *, void *);
+    void (*route)(int, struct kernel_route *, void *);
     void *route_closure;
-    int (*link)(struct kernel_link *, void *);
+    void (*link)(int, struct kernel_link *, void *);
     void *link_closure;
 };
 
@@ -80,7 +79,6 @@ int kernel_interface_ipv4(const char *ifname, int ifindex,
                           unsigned char *addr_r);
 int kernel_interface_mtu(const char *ifname, int ifindex);
 int kernel_interface_wireless(const char *ifname, int ifindex);
-int kernel_interface_channel(const char *ifname, int ifindex);
 int kernel_route(int operation, int table,
                  const unsigned char *dest, unsigned short plen,
                  const unsigned char *src, unsigned short src_plen,

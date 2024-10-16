@@ -86,9 +86,10 @@ int protocol_port;
 unsigned char protocol_group[16];
 int protocol_socket = -1;
 int kernel_socket = -1;
-static int kernel_routes_changed = 0;
 static int kernel_link_changed = 0;
 static int kernel_addr_changed = 0;
+int kernel_check_interval = 300;
+int shutdown_delay_msec = -1;
 
 struct timeval check_neighbours_timeout, check_interfaces_timeout;
 
@@ -98,31 +99,22 @@ static int accept_local_connections(void);
 static void init_signals(void);
 static void dump_tables(FILE *out);
 
-static int
-kernel_route_notify(struct kernel_route *route, void *closure)
-{
-    kernel_routes_changed = 1;
-    return -1;
-}
-
-static int
-kernel_addr_notify(struct kernel_addr *addr, void *closure)
+static void
+kernel_addr_notify(int add, struct kernel_addr *addr, void *closure)
 {
     kernel_addr_changed = 1;
-    return -1;
 }
 
-static int
-kernel_link_notify(struct kernel_link *link, void *closure)
+static void
+kernel_link_notify(int add, struct kernel_link *link, void *closure)
 {
     struct interface *ifp;
     FOR_ALL_INTERFACES(ifp) {
         if(strcmp(ifp->name, link->ifname) == 0) {
             kernel_link_changed = 1;
-            return -1;
+            return;
         }
     }
-    return 0;
 }
 
 int
@@ -157,7 +149,7 @@ main(int argc, char **argv)
 
     while(1) {
         opt = getopt(argc, argv,
-                     "m:p:h:H:i:k:A:srS:d:g:G:lwz:M:t:T:c:C:DL:I:V");
+                     "m:p:h:H:i:k:A:srS:d:g:G:lwM:t:T:c:C:DL:I:V");
         if(opt < 0)
             break;
 
@@ -241,20 +233,6 @@ main(int argc, char **argv)
             break;
         case 'w':
             all_wireless = 1;
-            break;
-        case 'z':
-            {
-                char *comma;
-                diversity_kind = (int)strtol(optarg, &comma, 0);
-                if(*comma == '\0')
-                    diversity_factor = 128;
-                else if(*comma == ',')
-                    diversity_factor = parse_nat(comma + 1);
-                else
-                    goto usage;
-                if(diversity_factor <= 0 || diversity_factor > 256)
-                    goto usage;
-            }
             break;
         case 'M': {
             int l = parse_nat(optarg);
@@ -507,6 +485,12 @@ main(int argc, char **argv)
         goto fail;
     }
 
+    rc = kernel_setup_socket(1);
+    if(rc < 0 || kernel_socket < 0) {
+        perror("Couldn't setup kernel socket");
+        goto fail;
+    }
+
     if(local_server_port >= 0) {
         local_server_socket = tcp_server_socket(local_server_port, 1);
         if(local_server_socket < 0) {
@@ -530,14 +514,13 @@ main(int argc, char **argv)
 
     check_interfaces();
 
-    rc = check_xroutes(0);
+    rc = check_xroutes(0, 0);
     if(rc < 0)
         fprintf(stderr, "Warning: couldn't check exported routes.\n");
 
-    kernel_routes_changed = 0;
     kernel_link_changed = 0;
     kernel_addr_changed = 0;
-    kernel_dump_time = now.tv_sec + roughly(30);
+    kernel_dump_time = now.tv_sec + roughly(kernel_check_interval);
     schedule_neighbours_check(5000, 1);
     schedule_interfaces_check(30000, 1);
     expiry_time = now.tv_sec + roughly(30);
@@ -583,7 +566,8 @@ main(int argc, char **argv)
         timeval_min(&tv, &check_interfaces_timeout);
         timeval_min_sec(&tv, expiry_time);
         timeval_min_sec(&tv, source_expiry_time);
-        timeval_min_sec(&tv, kernel_dump_time);
+        if(kernel_check_interval > 0)
+            timeval_min_sec(&tv, kernel_dump_time);
         timeval_min(&tv, &resend_time);
         FOR_ALL_INTERFACES(ifp) {
             if(!if_up(ifp))
@@ -602,11 +586,8 @@ main(int argc, char **argv)
             timeval_minus(&tv, &tv, &now);
             FD_SET(protocol_socket, &readfds);
             maxfd = MAX(maxfd, protocol_socket);
-            if(kernel_socket < 0) kernel_setup_socket(1);
-            if(kernel_socket >= 0) {
-                FD_SET(kernel_socket, &readfds);
-                maxfd = MAX(maxfd, kernel_socket);
-            }
+            FD_SET(kernel_socket, &readfds);
+            maxfd = MAX(maxfd, kernel_socket);
             if(local_server_socket >= 0 &&
                num_local_sockets < MAX_LOCAL_SOCKETS) {
                 FD_SET(local_server_socket, &readfds);
@@ -632,7 +613,7 @@ main(int argc, char **argv)
         if(exiting)
             break;
 
-        if(kernel_socket >= 0 && FD_ISSET(kernel_socket, &readfds)) {
+        if(FD_ISSET(kernel_socket, &readfds)) {
             struct kernel_filter filter = {0};
             filter.route = kernel_route_notify;
             filter.addr = kernel_addr_notify;
@@ -701,16 +682,13 @@ main(int argc, char **argv)
             kernel_link_changed = 0;
         }
 
-        if(kernel_routes_changed || kernel_addr_changed ||
-           now.tv_sec >= kernel_dump_time) {
-            rc = check_xroutes(1);
+        if(kernel_addr_changed ||
+           (kernel_check_interval > 0 && now.tv_sec >= kernel_dump_time)) {
+            rc = check_xroutes(1, !kernel_addr_changed);
             if(rc < 0)
                 fprintf(stderr, "Warning: couldn't check exported routes.\n");
-            kernel_routes_changed = kernel_addr_changed = 0;
-            if(kernel_socket >= 0)
-                kernel_dump_time = now.tv_sec + roughly(300);
-            else
-                kernel_dump_time = now.tv_sec + roughly(30);
+            kernel_addr_changed = 0;
+            kernel_dump_time = now.tv_sec + roughly(kernel_check_interval);
         }
 
         if(timeval_compare(&check_neighbours_timeout, &now) < 0) {
@@ -782,31 +760,29 @@ main(int argc, char **argv)
     usleep(roughly(10000));
     gettime(&now);
 
+    for (unsigned retrans=0; retrans < 1; retrans++) {
+        FOR_ALL_INTERFACES(ifp) {
+            if(!if_up(ifp))
+                continue;
+            send_wildcard_retraction(ifp);
+            /* Make sure that we expire quickly from our neighbours'
+               association caches. */
+            send_multicast_hello(ifp, 10, 1);
+            flushbuf(&ifp->buf, ifp);
+            usleep(roughly(1000));
+            gettime(&now);
+        }
+    }
+
+    if (shutdown_delay_msec > 0)
+	    usleep(roughly(shutdown_delay_msec * 1000));
+
     /* We need to flush so interface_updown won't try to reinstall. */
     flush_all_routes();
 
-    FOR_ALL_INTERFACES(ifp) {
-        if(!if_up(ifp))
-            continue;
-        send_wildcard_retraction(ifp);
-        /* Make sure that we expire quickly from our neighbours'
-           association caches. */
-        send_multicast_hello(ifp, 10, 1);
-        flushbuf(&ifp->buf, ifp);
-        usleep(roughly(1000));
-        gettime(&now);
-    }
-    FOR_ALL_INTERFACES(ifp) {
-        if(!if_up(ifp))
-            continue;
-        /* Make sure they got it. */
-        send_wildcard_retraction(ifp);
-        send_multicast_hello(ifp, 1, 1);
-        flushbuf(&ifp->buf, ifp);
-        usleep(roughly(10000));
-        gettime(&now);
+    FOR_ALL_INTERFACES(ifp)
         interface_updown(ifp, 0);
-    }
+
     kernel_setup_socket(0);
     kernel_setup(0);
 
@@ -1040,31 +1016,14 @@ dump_route(FILE *out, struct babel_route *route)
     const unsigned char *nexthop =
         memcmp(route->nexthop, route->neigh->address, 16) == 0 ?
         NULL : route->nexthop;
-    char channels[100];
-
-    if(route->channels_len == 0) {
-        channels[0] = '\0';
-    } else {
-        int k, j = 0;
-        snprintf(channels, 100, " chan (");
-        j = strlen(channels);
-        for(k = 0; k < route->channels_len; k++) {
-            if(k > 0)
-                channels[j++] = ',';
-            snprintf(channels + j, 100 - j, "%u", (unsigned)route->channels[k]);
-            j = strlen(channels);
-        }
-        snprintf(channels + j, 100 - j, ")");
-    }
 
     fprintf(out, "%s from %s metric %d (%d) refmetric %d id %s "
-            "seqno %d%s age %d via %s neigh %s%s%s%s\n",
+            "seqno %d age %d via %s neigh %s%s%s%s\n",
             format_prefix(route->src->prefix, route->src->plen),
             format_prefix(route->src->src_prefix, route->src->src_plen),
             route_metric(route), route_smoothed_metric(route), route->refmetric,
             format_eui64(route->src->id),
             (int)route->seqno,
-            channels,
             (int)(now.tv_sec - route->time),
             route->neigh->ifp->name,
             format_address(route->neigh->address),
@@ -1096,7 +1055,7 @@ dump_tables(FILE *out)
 
     FOR_ALL_NEIGHBOURS(neigh) {
         fprintf(out, "Neighbour %s dev %s reach %04x ureach %04x "
-                "rxcost %u txcost %d rtt %s rttcost %u chan %d%s.\n",
+                "rxcost %u txcost %d rtt %s rttcost %u%s.\n",
                 format_address(neigh->address),
                 neigh->ifp->name,
                 neigh->hello.reach,
@@ -1105,7 +1064,6 @@ dump_tables(FILE *out)
                 neigh->txcost,
                 format_thousands(neigh->rtt),
                 neighbour_rttcost(neigh),
-                neigh->ifp->channel,
                 if_up(neigh->ifp) ? "" : " (down)");
     }
 

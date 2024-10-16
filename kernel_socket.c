@@ -383,13 +383,6 @@ kernel_interface_wireless(const char *ifname, int ifindex)
 }
 
 int
-kernel_interface_channel(const char *ifname, int ifindex)
-{
-    errno = ENOSYS;
-    return -1;
-}
-
-int
 kernel_has_ipv6_subtrees(void)
 {
     return 0;
@@ -737,9 +730,7 @@ kernel_routes(struct kernel_filter *filter) {
         if(debug > 2)
             print_kernel_route(1, &route);
 
-        rc = filter->route(&route, filter->route_closure);
-        if(rc < 0)
-            break;
+        filter->route(1, &route, filter->route_closure);
     }
 
     free(buf);
@@ -782,9 +773,10 @@ socket_read(int sock, struct kernel_filter *filter)
         rc = parse_kernel_route(&buf.rtm, &route);
         if(rc < 0)
             return 0;
-        filter->route(&route, filter->route_closure);
+        filter->route(buf.rtm.rtm_type != RTM_DELETE, &route,
+                      filter->route_closure);
         if(debug > 2)
-            print_kernel_route(1,&route);
+            print_kernel_route(1, &route);
         return 1;
 
     }
@@ -827,7 +819,7 @@ kernel_addresses(struct kernel_filter *filter)
         } else {
             continue;
         }
-        filter->addr(&addr, filter->addr_closure);
+        filter->addr(1, &addr, filter->addr_closure);
     }
 
     freeifaddrs(ifa);

@@ -57,7 +57,7 @@ struct interface_conf {
     char rfc6126;
     char accept_bad_signatures;
     char v4viav6;
-    int channel;
+    char probe_mtu;
     unsigned int rtt_decay;
     unsigned int rtt_min;
     unsigned int rtt_max;
@@ -92,6 +92,8 @@ struct interface_conf {
 #define IF_DTLS (1 << 9)
 /* Announce v4-via-v6 routes through this interface. */
 #define IF_V4VIAV6 (1 << 10)
+/* Use maximum size Hello packets */
+#define IF_PROBE_MTU (1 << 11)
 
 /* Only INTERFERING can appear on the wire. */
 #define IF_CHANNEL_UNKNOWN 0
@@ -124,7 +126,6 @@ struct interface {
     unsigned int ifindex;
     unsigned short flags;
     unsigned short cost;
-    int channel;
     struct timeval hello_timeout;
     struct timeval update_timeout;
     struct timeval update_flush_timeout;

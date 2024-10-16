@@ -39,11 +39,16 @@ THE SOFTWARE.
 #include <sys/socket.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
+#include <linux/wireless.h>
 #include <net/if_arp.h>
 
 /* From <linux/if_bridge.h> */
 #ifndef BRCTL_GET_BRIDGES
 #define BRCTL_GET_BRIDGES 1
+#endif
+
+#ifndef NETLINK_GET_STRICT_CHK
+#define NETLINK_GET_STRICT_CHK 12
 #endif
 
 #if(__GLIBC__ < 2) || (__GLIBC__ == 2 && __GLIBC_MINOR__ <= 5)
@@ -74,6 +79,7 @@ THE SOFTWARE.
     } while(0)
 
 int export_table = -1, import_tables[MAX_IMPORT_TABLES], import_table_count = 0;
+int per_table_dumps = 0;
 
 struct sysctl_setting {
     char *name;
@@ -106,7 +112,7 @@ static int dgram_socket = -1;
 #define NO_ARPHRD
 #endif
 
-static int filter_netlink(struct nlmsghdr *nh, struct kernel_filter *filter);
+static void filter_netlink(struct nlmsghdr *nh, struct kernel_filter *filter);
 
 static int
 get_old_if(const char *ifname)
@@ -324,6 +330,10 @@ netlink_socket(struct netlink *nl, uint32_t groups)
     if(rc < 0)
         perror("Warning: couldn't enable netlink extended acks");
 
+    rc = setsockopt(nl->sock, SOL_NETLINK, NETLINK_GET_STRICT_CHK,
+                    &one, sizeof(one));
+    per_table_dumps = (rc == 0);
+
     rc = bind(nl->sock, (struct sockaddr *)&nl->sockaddr, nl->socklen);
     if(rc < 0)
         goto fail;
@@ -395,14 +405,12 @@ netlink_read(struct netlink *nl, struct netlink *nl_ignore, int answer,
     /* -1 : error                                          */
     /*  0 : success                                        */
 
-    int err;
     struct msghdr msg;
     struct sockaddr_nl nladdr;
     struct iovec iov;
     struct nlmsghdr *nh;
     int len;
     int done = 0;
-    int skip = 0;
 
     struct nlmsghdr buf[8192/sizeof(struct nlmsghdr)];
 
@@ -485,15 +493,10 @@ netlink_read(struct netlink *nl, struct netlink *nl_ignore, int answer,
             } else if(nh->nlmsg_type == RTM_NEWLINK || nh->nlmsg_type == RTM_DELLINK ) {
                 kdebugf("detected an interface change via netlink - triggering babeld interface check\n");
                 check_interfaces();
-            } else if(skip) {
-                kdebugf("(skip)");
-            } if(filter) {
-                kdebugf("(msg -> \"");
-                err = filter_netlink(nh, filter);
-                kdebugf("\" %d), ", err);
-                if(err < 0) skip = 1;
-                continue;
             }
+
+            if(filter)
+                filter_netlink(nh, filter);
             kdebugf(", ");
         }
         kdebugf("\n");
@@ -896,9 +899,6 @@ isbatman(const char *ifname, int ifindex)
 int
 kernel_interface_wireless(const char *ifname, int ifindex)
 {
-#ifndef SIOCGIWNAME
-#define SIOCGIWNAME 0x8B01
-#endif
     struct ifreq req;
     int rc;
 
@@ -921,18 +921,6 @@ kernel_interface_wireless(const char *ifname, int ifindex)
     return rc;
 }
 
-/* Sorry for that, but I haven't managed to get <linux/wireless.h>
-   to include cleanly. */
-
-#define SIOCGIWFREQ 0x8B05
-
-struct iw_freq {
-    int m;
-    short e;
-    unsigned char i;
-    unsigned char flags;
-};
-
 struct iwreq_subset {
     union {
         char ifrn_name[IFNAMSIZ];
@@ -942,59 +930,6 @@ struct iwreq_subset {
         struct iw_freq freq;
     } u;
 };
-
-static int
-freq_to_chan(struct iw_freq *freq)
-{
-    int m = freq->m, e = freq->e;
-
-    /* If exponent is 0, assume the channel is encoded directly in m. */
-    if(e == 0 && m > 0 && m < 254)
-        return m;
-
-    if(e <= 6) {
-        int mega, step, c, i;
-
-        /* This encodes 1 MHz */
-        mega = 1000000;
-        for(i = 0; i < e; i++)
-            mega /= 10;
-
-        /* Channels 1 through 13 are 5 MHz apart, with channel 1 at 2412. */
-        step = 5 * mega;
-        c = 1 + (m - 2412 * mega + step / 2) / step;
-        if(c >= 1 && c <= 13)
-            return c;
-
-        /* Channel 14 is at 2484 MHz  */
-        if(c >= 14 && m < 2484 * mega + step / 2)
-            return 14;
-
-        /* 802.11a channel 36 is at 5180 MHz */
-        c = 36 + (m - 5180 * mega + step / 2) / step;
-        if(c >= 34 && c <= 165)
-            return c;
-    }
-
-    errno = ENOENT;
-    return -1;
-}
-
-int
-kernel_interface_channel(const char *ifname, int ifindex)
-{
-    struct iwreq_subset iwreq;
-    int rc;
-
-    memset(&iwreq, 0, sizeof(iwreq));
-    strncpy(iwreq.ifr_ifrn.ifrn_name, ifname, IFNAMSIZ);
-
-    rc = ioctl(dgram_socket, SIOCGIWFREQ, &iwreq);
-    if(rc >= 0)
-        return freq_to_chan(&iwreq.u.freq);
-    else
-        return -1;
-}
 
 int
 kernel_has_ipv6_subtrees(void)
@@ -1346,9 +1281,8 @@ filter_kernel_routes(struct nlmsghdr *nh, struct kernel_route *route)
 int
 kernel_dump(int operation, struct kernel_filter *filter)
 {
-    int i, rc;
+    int i, j, rc;
     int families[2] = { AF_INET6, AF_INET };
-    struct rtgenmsg g;
 
     if(!nl_setup) {
         fprintf(stderr,"kernel_dump: netlink not initialized.\n");
@@ -1367,24 +1301,36 @@ kernel_dump(int operation, struct kernel_filter *filter)
     }
 
     for(i = 0; i < 2; i++) {
-        memset(&g, 0, sizeof(g));
-        g.rtgen_family = families[i];
+        struct rtmsg msg = {
+            .rtm_family = families[i]
+        };
+
         if(operation & CHANGE_ROUTE) {
-            rc = netlink_send_dump(RTM_GETROUTE, &g, sizeof(g));
-            if(rc < 0)
-                return -1;
+            for (j = 0; j < import_table_count; j++) {
+                msg.rtm_table = import_tables[j];
 
-            rc = netlink_read(&nl_command, NULL, 1, filter);
-            if(rc < 0)
-                return -1;
+                rc = netlink_send_dump(RTM_GETROUTE, &msg, sizeof(msg));
+                if(rc < 0)
+                    return -1;
+
+                rc = netlink_read(&nl_command, NULL, 1, filter);
+                if(rc < 0)
+                    return -1;
+
+                /* the filtering on rtm_table above won't work on old kernels,
+                   in which case we'll just get routes from all tables in one
+                   dump; we detect this on socket setup, so we can just break
+                   the loop if we know it won't work */
+                if (!per_table_dumps)
+                    break;
+            }
         }
-
     }
 
     if(operation & CHANGE_ADDR) {
-        memset(&g, 0, sizeof(g));
-        g.rtgen_family = AF_UNSPEC;
-        rc = netlink_send_dump(RTM_GETADDR, &g, sizeof(g));
+        struct ifaddrmsg msg = {};
+
+        rc = netlink_send_dump(RTM_GETADDR, &msg, sizeof(msg));
         if(rc < 0)
             return -1;
 
@@ -1520,41 +1466,44 @@ filter_addresses(struct nlmsghdr *nh, struct kernel_addr *addr)
     return 1;
 }
 
-static int
+static void
 filter_netlink(struct nlmsghdr *nh, struct kernel_filter *filter)
 {
-    int rc;
+    int rc, tpe;
     union {
         struct kernel_route route;
         struct kernel_addr addr;
         struct kernel_link link;
     } u;
 
-    switch(nh->nlmsg_type) {
+    tpe = nh->nlmsg_type;
+    switch(tpe) {
     case RTM_NEWROUTE:
     case RTM_DELROUTE:
         if(!filter->route) break;
         rc = filter_kernel_routes(nh, &u.route);
         if(rc <= 0) break;
-        return filter->route(&u.route, filter->route_closure);
+        filter->route(tpe == RTM_NEWROUTE, &u.route, filter->route_closure);
+        break;
     case RTM_NEWLINK:
     case RTM_DELLINK:
         if(!filter->link) break;
         rc = filter_link(nh, &u.link);
         if(rc <= 0) break;
-        return filter->link(&u.link, filter->link_closure);
+        filter->link(tpe == RTM_NEWLINK, &u.link, filter->link_closure);
+        break;
     case RTM_NEWADDR:
     case RTM_DELADDR:
         if(!filter->addr) break;
         rc = filter_addresses(nh, &u.addr);
         if(rc <= 0) break;
-        return filter->addr(&u.addr, filter->addr_closure);
+        filter->addr(tpe == RTM_NEWADDR, &u.addr, filter->addr_closure);
+        break;
     default:
         kdebugf("filter_netlink: unexpected message type %d\n",
                 nh->nlmsg_type);
         break;
     }
-    return 0;
 }
 
 int

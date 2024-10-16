@@ -197,31 +197,6 @@ check_interface_ipv4(struct interface *ifp)
 }
 
 static int
-check_interface_channel(struct interface *ifp)
-{
-    int channel = IF_CONF(ifp, channel);
-    int rc = 1;
-
-    if(channel == IF_CHANNEL_UNKNOWN) {
-        /* IF_WIRELESS merely means that we know for sure that the
-           interface is wireless, so check unconditionally. */
-        channel = kernel_interface_channel(ifp->name, ifp->ifindex);
-        if(channel < 0) {
-            if((ifp->flags & IF_WIRELESS))
-                rc = -1;
-            channel = (ifp->flags & IF_WIRELESS) ?
-                IF_CHANNEL_INTERFERING : IF_CHANNEL_NONINTERFERING;
-        }
-    }
-
-    if(ifp->channel != channel) {
-        ifp->channel = channel;
-        return rc;
-    }
-    return 0;
-}
-
-static int
 check_link_local_addresses(struct interface *ifp)
 {
     struct kernel_route ll[32];
@@ -332,8 +307,8 @@ interface_updown(struct interface *ifp, int up)
         if(ifp->buf.buf)
             free(ifp->buf.buf);
 
-        /* 40 for IPv6 header, 8 for UDP header, 12 for good luck. */
-        ifp->buf.size = mtu - sizeof(packet_header) - 60;
+        /* 40 for IPv6 header, 8 for UDP header. */
+        ifp->buf.size = mtu - sizeof(packet_header) - 48;
         ifp->buf.buf = malloc(ifp->buf.size);
         if(ifp->buf.buf == NULL) {
             fprintf(stderr, "Couldn't allocate sendbuf.\n");
@@ -462,7 +437,7 @@ interface_updown(struct interface *ifp, int up)
 
         if(IF_CONF(ifp, v4viav6) == CONFIG_NO)
             v4viav6 = 0;
-        else if(IF_CONF(ifp, v4viav6 == CONFIG_YES))
+        else if(IF_CONF(ifp, v4viav6) == CONFIG_YES)
             v4viav6 = 1;
         else
             v4viav6 = kernel_safe_v4viav6();
@@ -470,6 +445,9 @@ interface_updown(struct interface *ifp, int up)
             ifp->flags |= IF_V4VIAV6;
         else
             ifp->flags &= ~IF_V4VIAV6;
+
+        if(IF_CONF(ifp, probe_mtu) == CONFIG_YES)
+            ifp->flags |= IF_PROBE_MTU;
 
         rc = check_link_local_addresses(ifp);
         if(rc < 0) {
@@ -485,11 +463,6 @@ interface_updown(struct interface *ifp, int up)
             goto fail;
         }
 
-        rc = check_interface_channel(ifp);
-        if(rc < 0)
-            fprintf(stderr,
-                    "Warning: couldn't determine channel of interface %s.\n",
-                    ifp->name);
         update_interface_metric(ifp);
         rc = check_interface_ipv4(ifp);
 
@@ -502,10 +475,9 @@ interface_updown(struct interface *ifp, int up)
                 ifp->key = NULL;
         }
 
-        debugf("Upped interface %s (cost=%d, channel=%d%s).\n",
+        debugf("Upped interface %s (cost=%d%s).\n",
                ifp->name,
                ifp->cost,
-               ifp->channel,
                ifp->ipv4 ? ", IPv4" : "");
 
         set_timeout(&ifp->hello_timeout, ifp->hello_interval);
@@ -597,7 +569,6 @@ check_interfaces(void)
             /* Bother, said Pooh.  We should probably check for a change
                in IPv4 addresses at this point. */
             check_link_local_addresses(ifp);
-            check_interface_channel(ifp);
             rc = check_interface_ipv4(ifp);
             if(rc > 0) {
                 send_multicast_request(ifp, NULL, 0, NULL, 0);

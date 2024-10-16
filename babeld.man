@@ -46,24 +46,6 @@ sent on wireless interfaces.  The default is 4 seconds.
 Specify the interval in seconds at which scheduled hello packets are
 sent on wired interfaces.  The default is 4 seconds.
 .TP
-.BI \-z " kind" " \fR[\fB," factor "\fR]"
-Enable diversity-sensitive routing.  The value
-.B kind
-defines the diversity algorithm used, and can be one of
-.B 0
-(no diversity),
-.B 1
-(per-interface diversity with no memory),
-.B 2
-(per-channel diversity with no memory),
-or
-.B 3
-(per-channel diversity with memory).
-The value
-.B factor
-specifies by how much the cost of non-interfering routes is multiplied,
-in units of 1/256; the default is 128 (i.e. division by 2).
-.TP
 .BI \-M " half-time"
 Specify the half-time in seconds of the exponential decay used for
 smoothing metrics for performing route selection; the value 0 disables
@@ -253,23 +235,22 @@ and can be specified multiple times with a cumulative effect.  This is
 equivalent to the command-line option
 .BR \-T .
 .TP
+.BI kernel-check-interval " seconds"
+This specifies the interval between two kernel routing table dumps.  The
+default is 300s (5 minutes).  This may be set to 0 in order to never
+perform periodic kernel dumps.
+.TP
+.BI shutdown-delay-ms " milliseconds"
+During shutdown we first notify neighbours of our imminent shutdown by
+sending route retractions, wait for the specified number of milliseconds
+and then flush kernel routes. This ensures any inflight traffic is still
+properly forwarded. You may want to ensure the delay is appropriate for the
+maximum delay path in your network. Setting this to zero is permissible.
+.TP
 .BR link-detect " {" true | false }
 This specifies whether to use carrier sense for determining interface
 availability, and is equivalent to the command-line option
 .BR \-l .
-.TP
-.BR diversity " {" true | false | "\fIkind\fB" }
-This specifies the diversity algorithm to use;
-.B true
-is equivalent to
-.I kind
-3.  The default is
-.B false
-(do not use any diversity algorithm).
-.TP
-.BI diversity-factor " factor"
-This specifies by how much the cost of non-interfering routes should
-be multiplied, in units of 1/256.  The default is 128 (division by 2).
 .TP
 .BI smoothing-half-life " seconds"
 This specifies the half-life in seconds of the exponential decay used
@@ -383,23 +364,6 @@ used for computing metrics of routes going through this interface depends
 on whether link quality estimation is being done.  The default is 256 if
 the interface is wireless, and 96 otherwise.
 .TP
-.BI channel " channel"
-Sets the channel for this interface.  The value
-.I channel
-can be either an integer, or one of the strings
-.B interfering
-or
-.BR noninterfering .
-The default is to autodetect the channel number for wireless interfaces,
-and
-.B noninterfering
-for other interfaces.
-.TP
-.BR faraway " {" true | false }
-This specifies whether the network is "far away", in the sense that
-networks behind it don't interfere with networks in front of it.  By
-default, networks are not far away.
-.TP
 .BI hello\-interval " interval"
 This defines the interval between hello packets sent on this interface.
 The default is specified with the
@@ -465,9 +429,14 @@ and
 .BR 0
 otherwise.
 .TP
-.B$ v4-via-v6 " {" true | false }
+.BR v4-via-v6 " {" true | false }
 Whether to announce IPv4 routes through this interface even when there is
 no IPv4 address.  The default depends on the kernel version.
+.TP
+.BR probe-mtu " {" true | false }
+Pad all packets containing a Hello TLV to the MTU and disable
+fragmentation.  This will avoid establishing adjacencies across links with
+a mis-configured MTU, at the cost of slightly higher network usage.
 .TP
 .BI key " id"
 Enable HMAC security on this interface, and use the key
@@ -476,7 +445,6 @@ Enable HMAC security on this interface, and use the key
 .BR accept\-bad\-signatures " {" true | false }
 Accept packets with no signature or an incorrect signature.  This only has
 an effect if a key was configured on an interface.  The default is false.
-.TP
 .SS Filtering rules
 A filtering rule is defined by a single line with the following format:
 .IP
