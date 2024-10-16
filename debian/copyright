@@ -5,6 +5,7 @@ Source: https://www.irif.fr/~jch/software/files/
 Upstream-Author: Juliusz Chroboczek
 Files-Excluded:
   rfc6234/rfc6234.txt
+  BLAKE2/*
 
 Files: *
 Copyright: 2007-2013, Juliusz Chroboczek and others
@@ -18,12 +19,6 @@ Files: rfc6234/*
 Copyright:
  2011, IETF Trust and the persons identified as authors of the code
 License: BSD3-IETF
-
-Files: BLAKE2/*
-Copyright:
- 2012, Samuel Neves <sneves@dei.uc.pt>
- 2016, JP Aumasson <jeanphilippe.aumasson@gmail.com>.
-License: CC0-or-OpenSSL-or-Apache-2.0
 
 License: MIT
  Permission is hereby granted, free of charge, to any person
@@ -79,15 +74,3 @@ License: BSD3-IETF
  OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
  EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-License: CC0-or-OpenSSL-or-Apache-2.0
- .   
- You may use this under the terms of the CC0, the OpenSSL Licence, or the
- Apache Public License 2.0, at your option.  The terms of these licenses
- can be found at:
- .
- - CC0 1.0 Universal : http://creativecommons.org/publicdomain/zero/1.0
- - OpenSSL license   : https://www.openssl.org/source/license.html
- - Apache 2.0        : http://www.apache.org/licenses/LICENSE-2.0
- .
- On Debian systems, the complete text of the Apache version 2.0 license
- can be found in "/usr/share/common-licenses/Apache-2.0".
